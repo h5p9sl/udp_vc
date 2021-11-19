@@ -1,9 +1,9 @@
-CFLAGS=-std=c99 -Wall -Wextra
+CFLAGS=-std=c99 -Wall -Wextra -lssl -lcrypto
 
-SERVER_SRC=server.c
+SERVER_SRC=src/server/*.c
 SERVER_OUT=server
 
-CLIENT_SRC=client.c
+CLIENT_SRC=src/client/main.c
 CLIENT_OUT=client
 
 all: server client

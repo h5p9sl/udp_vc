@@ -2,6 +2,7 @@
 #include <pulse/error.h>
 #include <opus/opus.h>
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -18,24 +19,21 @@
 #include <poll.h>
 
 #include <pthread.h>
+#include <assert.h>
 
-#define VC_SAMPLE_RATE 8000
-#define VC_FRAME_SIZE 800
+#include "shared.h"
+#include "audio_system.h"
+
 
 static int transmit_voice = 0;
 
-/* Recording */
+/* Recording thread */
 static pthread_mutex_t record_mutex = PTHREAD_MUTEX_INITIALIZER;
-static uint8_t encoded_voice_data[VC_FRAME_SIZE];
-static size_t encoded_voice_datalen = 0;
+static struct EncodedDataBuffer record_out_buf;
 
-/* Playback */
+/* Playback thread */
 static pthread_mutex_t playback_mutex = PTHREAD_MUTEX_INITIALIZER;
 static uint8_t raw_voice_data[VC_FRAME_SIZE];
-
-static pa_simple* pulseaudio;
-static OpusEncoder* opus_e;
-static OpusDecoder* opus_d;
 
 
 //
@@ -43,102 +41,26 @@ static OpusDecoder* opus_d;
 //
 
 
-int init_pulseaudio(pa_simple** pa, int mode) {
-	int error = 0;
-
-	static const struct pa_sample_spec ss = {
-		.format = PA_SAMPLE_S16LE,
-		.rate = VC_SAMPLE_RATE,
-		.channels = 1,
-	};
-
-	fprintf(stderr, "Initializing Pulseaudio...\n");
-
-	/* Open default device for recording */
-	*pa = pa_simple_new(NULL,
-			"udp_vc",
-			mode,
-			NULL,
-			"udp_vc",
-			&ss,
-			NULL,
-			NULL,
-			&error);
-
-	if ((*pa) == NULL) {
-		fprintf(stderr,
-			"init_pulseaudio failed: %s\n",
-			pa_strerror(error));
-	}
-
-	return error;
-}
-
-void free_pulseaudio(pa_simple** pa) {
-	fprintf(stderr, "Destroying Pulseaudio\n");
-	pa_simple_free(*pa);
-	*pa = NULL;
-}
-
-int init_opus(OpusEncoder** opus_e, OpusDecoder** opus_d) {
-	int error;
-
-	fprintf(stderr, "Initializing Opus...\n");
-
-	*opus_e = opus_encoder_create(
-			VC_SAMPLE_RATE,
-			1,
-			OPUS_APPLICATION_VOIP,
-			&error);
-
-	if (error != OPUS_OK) {
-		fprintf(stderr,
-			"init_opus failed with error code %i\n",
-			error);
-	}
-
-	*opus_d = opus_decoder_create(
-			VC_SAMPLE_RATE,
-			1,
-			&error);
-
-	if (error != OPUS_OK) {
-		fprintf(stderr,
-			"init_opus failed with error code %i\n",
-			error);
-	}
-
-	return error;
-}
-
-void free_opus(struct OpusEncoder** opus_e, struct OpusDecoder** opus_d) {
-	fprintf(stderr, "Destroying Opus\n");
-	opus_encoder_destroy(*opus_e);
-	opus_decoder_destroy(*opus_d);
-	*opus_e = NULL;
-	*opus_d = NULL;
-}
-
 
 //
 // Audio recording / playback threads
 //
 
-
 void* voice_record_thread(void* _arg) {
-	char buf[VC_FRAME_SIZE];
-	char encoded_buf[VC_FRAME_SIZE];
-	int len, error;
 
-	init_pulseaudio(&pulseaudio, PA_STREAM_RECORD);
+	char raw_data[VC_PACKET_SIZE];
+	char encoded_data[VC_PACKET_SIZE];
+	int len, error;
+	pa_simple* pa;
+
+	init_pulseaudio(&pa, PA_STREAM_RECORD);
 
 	while (transmit_voice) {
-		memset(encoded_buf, 0, sizeof encoded_buf);
 
-		if (pa_simple_read(pulseaudio,
-				&buf,
-				VC_FRAME_SIZE,
-				&error) < 0) {
+		if (pa_simple_read(pa,
+				&raw_data,
+				VC_PACKET_SIZE,
+				&error) != 0) {
 			fprintf(stderr,
 				"Failed to read device: %s\n",
 				pa_strerror(error));
@@ -146,24 +68,28 @@ void* voice_record_thread(void* _arg) {
 		}
 
 		if ((len = opus_encode(opus_e,
-				(int16_t*)buf,
+				(int16_t*)raw_data,
 				VC_FRAME_SIZE,
-				(uint8_t*)encoded_buf,
+				(uint8_t*)encoded_data,
 				VC_FRAME_SIZE)) < 0) {
 			fprintf(stderr,
 					"opus_encode failed with error code %i\n",
-					error);
+					len);
 			break;
 		}
-		pthread_mutex_lock(&record_mutex);
-		{
-			encoded_voice_datalen = len;
-			memcpy(encoded_voice_data, encoded_buf, len);
+		assert(len != 0);
+
+		pthread_mutex_lock(&record_mutex); {
+			struct EncodedDataBuffer* data
+				= &record_out_buf;
+
+			data->length = len;
+			memcpy(&data->data, encoded_data, len);
 		}
 		pthread_mutex_unlock(&record_mutex);
 	}
 
-	free_pulseaudio(&pulseaudio);
+	free_pulseaudio(&pa);
 	return NULL;
 }
 
@@ -208,7 +134,8 @@ int resolve_host_into_socket(
 		char* port,
 		struct addrinfo* hints,
 		int* fd,
-		char should_connect,
+		bool should_connect,
+		bool should_bind,
 		struct sockaddr* addr /* can be null */,
 		socklen_t* addrlen /* can be null */
 ) {
@@ -225,6 +152,10 @@ int resolve_host_into_socket(
 				cur->ai_socktype,
 				cur->ai_protocol)) < 0)
 			continue;
+		if (should_bind) {
+			if (connect(*fd, cur->ai_addr, cur->ai_addrlen) < 0)
+				continue;
+		}
 		if (should_connect) {
 			if (connect(*fd, cur->ai_addr, cur->ai_addrlen) < 0)
 				continue;
@@ -277,7 +208,8 @@ int main(int argc, char* argv[]) {
 			argv[2],
 			&hints,
 			&sock,
-			1,
+			true,
+			false,
 			NULL,
 			NULL) < 0) {
 		return 1;
@@ -288,27 +220,32 @@ int main(int argc, char* argv[]) {
 	hints.ai_socktype 	= SOCK_DGRAM;
 
 	/* Create socket for datagram */
-	if (resolve_host_into_socket(argv[1],
+	if (resolve_host_into_socket(
+			argv[1],
 			"6061",
 			&hints,
 			&vcsock,
-			0,
+			false,
+			true,
 			(struct sockaddr*)&remote_addr,
 			&remote_addrlen) < 0) {
 		return 1;
 	}
 
-	puts("Connected. To start/stop transmitting your"
+	puts("Connected. To start/stop transmitting your "
 		"voice, type \"/VOICE\".");
 	puts("To use text chat, type something and press enter.");
 
 	nfds = 3;
 	fds = (struct pollfd*)calloc(nfds, sizeof(struct pollfd));
+
 	fds[0].fd = STDIN_FILENO;
 	fds[0].events = POLLIN;
+	/* Text chat */
 	fds[1].fd = sock;
 	fds[1].events = POLLIN | POLLHUP;
-	fds[2].fd = -1; /* uninitialized voice chat socket */
+	/* Voice chat */
+	fds[2].fd = -1; // Uninitialized until later
 	fds[2].events = POLLIN | POLLOUT;
 
 	while (1) {
@@ -323,25 +260,28 @@ int main(int argc, char* argv[]) {
 			struct pollfd* p = &fds[i];
 
 			if (p->revents & POLLOUT) {
-				if (p->fd == vcsock &&
-						transmit_voice &&
-						encoded_voice_datalen > 0) {
-					ssize_t s = 0;
+				if (p->fd == vcsock) {
+					struct EncodedDataBuffer data;
+					void* r = NULL;
+
+					if (!transmit_voice) continue;
 
 					pthread_mutex_lock(&record_mutex);
-
-					if ((s = sendto(vcsock,
-							&encoded_voice_data,
-							encoded_voice_datalen,
-							0,
-							(struct sockaddr*)&remote_addr,
-							remote_addrlen)) < 0) {
-						perror("sendto");
-						return 1;
+					if (record_out_buf.length != 0) {
+						r = memcpy(&data, &record_out_buf, sizeof data);
+						memset(&record_out_buf, 0, sizeof data);
 					}
-
-					encoded_voice_datalen = 0; /* Reset data length */
 					pthread_mutex_unlock(&record_mutex);
+
+					if (r == NULL) continue;
+					assert(data.length > 0);
+
+					fprintf(stderr, "sent %i\n",
+						gen_checksum(&data.data, data.length));
+
+					send_vc_data(vcsock, &data,
+						(struct sockaddr*)&remote_addr,
+						remote_addrlen);
 				}
 			}
 
@@ -349,12 +289,62 @@ int main(int argc, char* argv[]) {
 				char buf[256];
 				int r;
 
-				memset(buf, 0, sizeof buf);
-				r = read(p->fd, buf, 256);
-				if (p->fd == STDIN_FILENO) {
+				if (p->fd == vcsock) {
+					struct EncodedDataBuffer data;
+					char decoded_buf[VC_FRAME_SIZE];
+					int decoded, bruh;
+
+					if (!transmit_voice) continue;
+
+					if ((bruh = receive_vc_data(vcsock, &data, NULL, NULL)) <= 0) {
+						fprintf(stderr, "code bruh of value %i\n", bruh);
+						continue;
+					}
+					fprintf(stderr, "received %i\n", data.length);
+
+					if (dbg_packet_enabled) {
+						char fname[32];
+						sprintf(fname, dbg_packet_fmt,
+							"recvfrom", dbg_packet_count++);
+						FILE* fp = fopen(fname, "w");
+						fwrite(&data, r, 1, fp);
+						fclose(fp);
+					}
+					assert(data.length != 0);
+
+					/* FIXME
+						All of the audio data gets lost during
+						the opus_decode function. What remains
+						are only null bytes
+					 */
+
+					if ((decoded = opus_decode(opus_d,
+									(uint8_t*)&data.data,
+									data.length,
+									(int16_t*)&decoded_buf,
+									VC_FRAME_SIZE,
+									0)) < 0) {
+						fprintf(stderr,
+								"opus_decode returned %i\n",
+								decoded);
+					}
+
+					pthread_mutex_lock(&playback_mutex); {
+						/* push entry onto array */
+						if (++playback_in_buflen >= 10) {
+							playback_in_buflen = 9;
+						}
+
+						memcpy(&playback_in_buf[playback_in_buflen],
+							decoded_buf,
+							sizeof decoded_buf);
+					}
+					pthread_mutex_unlock(&playback_mutex);
+				} else if (p->fd == STDIN_FILENO) {
+					memset(buf, 0, sizeof buf);
+					r = read(p->fd, buf, 256);
 					if (strncasecmp("/VOICE", buf, 6) == 0) {
 						/* Toggle voice transmission */
-
 						transmit_voice = !transmit_voice;
 						fds[2].fd = transmit_voice ? vcsock : -1;
 
@@ -383,37 +373,9 @@ int main(int argc, char* argv[]) {
 						/* Send message normally */
 						send(sock, buf, r, 0);
 					}
-				} else if (p->fd == vcsock) {
-					if (transmit_voice) {
-						char encoded_buf[VC_FRAME_SIZE];
-						char decoded_buf[VC_FRAME_SIZE];
-						int encoded_len, decoded;
-
-						/* read voice data from server */ 
-						encoded_len = recvfrom(vcsock,
-								encoded_buf,
-								sizeof encoded_buf,
-								0, NULL, NULL);
-
-						if ((decoded = opus_decode(opus_d,
-										(uint8_t*)encoded_buf,
-										encoded_len,
-										(int16_t*)decoded_buf,
-										VC_FRAME_SIZE,
-										0)) < 0) {
-							fprintf(stderr,
-								"opus_decode returned %i\n", decoded);
-						}
-
-						pthread_mutex_lock(&playback_mutex);
-						{
-							for (int i = 0; i < decoded; i++) {
-								raw_voice_data[i] += decoded_buf[i];
-							}
-						}
-						pthread_mutex_unlock(&playback_mutex);
-					}
 				} else {
+					memset(buf, 0, sizeof buf);
+					r = read(p->fd, buf, 256);
 					buf[255] = '\0';
 					printf(buf);
 				}
