@@ -6,9 +6,6 @@
 
 #include <stdio.h>
 
-static OpusEncoder *opus_e;
-static OpusDecoder *opus_d;
-
 int init_pulseaudio(pa_simple **pa, int mode) {
   int error = 0;
   char *mode_str = (mode == PA_STREAM_PLAYBACK) ? "playback" : "rec";

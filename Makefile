@@ -1,9 +1,9 @@
-CFLAGS=-std=c99 -Wall -Wextra -lssl -lcrypto
+CFLAGS=-std=c99 -Wall -Wextra -lssl -lcrypto -Isrc
 
-SERVER_SRC=src/server/*.c
+SERVER_SRC=src/server/*.c src/polling.c
 SERVER_OUT=server
 
-CLIENT_SRC=src/client/main.c
+CLIENT_SRC=src/client/*.c src/polling.c
 CLIENT_OUT=client
 
 all: server client
@@ -11,7 +11,7 @@ all: server client
 debug: CFLAGS += --debug
 debug: all
 
-release: CFLAGS += --release
+release: CFLAGS += --release -O2
 release: all
 
 server: ${SERVER_SRC}

@@ -1,16 +1,20 @@
 #ifndef _CLIENT_LIST_H_
 #include <openssl/ssl.h>
+#include "polling.h"
 
 #define MAX_CLIENTS 16
 
 typedef struct {
   int fd;
-  int ps_index;
   SSL *ssl;
+  pollsys_handle_t pollsys_id;
 } ClientConnection;
 
-static ClientConnection client_list[MAX_CLIENTS];
-static unsigned int num_clients = 0;
+extern ClientConnection client_list[MAX_CLIENTS];
+extern unsigned int num_clients;
+
+void clientlist_init();
+void clientlist_free();
 
 /* Helper functions for properly creating and deleting entries
  *
@@ -18,8 +22,9 @@ static unsigned int num_clients = 0;
  *  upon success, the index of the deleted or created client entry is returned.
  *  upon failure, -1 is returned and an error is printed.
  * */
-int clientlist_delete_client(int index);
 int clientlist_create_client(int newfd);
+int clientlist_delete_client(int index);
+int clientlist_get_client_index(int fd);
 
 /* Client operations
  *

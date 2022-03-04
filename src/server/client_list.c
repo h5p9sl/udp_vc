@@ -6,9 +6,16 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+
+#include <openssl/err.h>
 #include <openssl/ssl.h>
 
+#include "polling.h"
+
 static const char *message_format = "<%s> %s\n";
+
+ClientConnection client_list[MAX_CLIENTS];
+unsigned int num_clients;
 
 /* conditionally use IPv4 or IPv6 */
 #define SOCKADDRSTORAGE_GET_SINADDR(x)                                         \
@@ -19,10 +26,34 @@ static const char *message_format = "<%s> %s\n";
 static const ClientConnection invalid_client = {
     .fd = -1,
     .ssl = NULL,
+    .pollsys_id = -1,
 };
 
 char is_valid_client(int index) {
   return index >= 0 && index < MAX_CLIENTS && client_list[index].fd > 0;
+}
+
+int clientlist_get_client_index(int fd) {
+  for (int i = 0; i < MAX_CLIENTS; i++) {
+    if (client_list[i].fd == fd)
+      return i;
+  }
+
+  return -1;
+}
+
+void clientlist_init() {
+  for (int i = 0; i < MAX_CLIENTS; i++) {
+    memcpy(&client_list[i], &invalid_client, sizeof(ClientConnection));
+  }
+  num_clients = 0;
+}
+
+void clientlist_free() {
+  for (int i = 0; i < MAX_CLIENTS; i++) {
+    if (is_valid_client(i))
+      clientlist_delete_client(i);
+  }
 }
 
 /* Free and delete entry at index */
@@ -34,7 +65,8 @@ int clientlist_delete_client(int index) {
     return -1;
   }
 
-  //pollingsystem_delete_entry(client->fd);
+  if (client->pollsys_id >= 0)
+    pollingsystem_delete_entry(client->pollsys_id);
 
   if (client->ssl)
     SSL_free(client->ssl);
@@ -44,7 +76,23 @@ int clientlist_delete_client(int index) {
 
   memcpy(client, &invalid_client, sizeof(ClientConnection));
 
+  num_clients--;
   return index;
+}
+
+void init_ssl(SSL *ssl) {
+  if (SSL_use_certificate_file(ssl, "server.cert", SSL_FILETYPE_PEM) != 1) {
+    ERR_print_errors_fp(stderr);
+    fputs("SSL_CTX_use_certificate_file failed", stderr);
+  }
+  if (SSL_use_PrivateKey_file(ssl, "server.pem", SSL_FILETYPE_PEM) != 1) {
+    ERR_print_errors_fp(stderr);
+    fputs("SSL_CTX_use_PrivateKey_file failed", stderr);
+  }
+  if (SSL_check_private_key(ssl) != 1) {
+    ERR_print_errors_fp(stderr);
+    fputs("SSL_CTX_check_private_key failed", stderr);
+  }
 }
 
 /* Create new client entry, perform SSL handshake, and register for event
@@ -62,20 +110,23 @@ int clientlist_create_client(int newfd) {
   ClientConnection *client = &client_list[index];
   client->fd = newfd;
 
-  //pollingsystem_create_entry(newfd);
+  client->pollsys_id = pollingsystem_create_entry(newfd, POLLIN);
 
   /* CTX_new(3ssl): "An SSL_CTX object is reference counted." */
   SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
 
   /* Create a new SSL session */
-  SSL *ssl = SSL_new(ctx);
-  SSL_set_fd(ssl, newfd);
-  SSL_set_accept_state(ssl);
+  client->ssl = SSL_new(ctx);
+  SSL_set_fd(client->ssl, newfd);
+  init_ssl(client->ssl);
 
-  if (SSL_do_handshake(ssl) <= 0) {
+  // if (SSL_do_handshake(ssl) <= 0) {
+  if (SSL_accept(client->ssl) <= 0) {
     char ipstr[INET6_ADDRSTRLEN] = {'\0'};
 
     get_client_ipstr(newfd, ipstr, sizeof ipstr);
+
+    ERR_print_errors_fp(stderr);
 
     fprintf(stderr,
             "SSL/TLS handshake with %s failed, closing "
@@ -86,6 +137,7 @@ int clientlist_create_client(int newfd) {
     return -1;
   }
 
+  num_clients++;
   return index;
 }
 
@@ -128,11 +180,15 @@ int client_msg_send(int from, int to, char *str) {
   }
 
   snprintf(buf, sizeof buf, message_format, username, str_filtered);
-  printf("%s", buf);
 
-  if (client_list[to].fd > 0) {
-    if (send(client_list[to].fd, buf, strlen(buf), 0) < 0) {
-      perror("send");
+  if (to == -1) {
+    printf("%s", buf);
+    return 0;
+  }
+
+  if (client_list[to].fd >= 0) {
+    if (SSL_write(client_list[to].ssl, buf, strlen(buf)) <= 0) {
+      fprintf(stderr, "SSL_write failed for %s\n", username);
       return -1;
     }
   }
@@ -144,5 +200,6 @@ int client_msg_sendall(int from, char *str) {
   for (unsigned i = 0; i < num_clients; i++) {
     client_msg_send(from, i, str);
   }
+  client_msg_send(from, -1, str);
   return 0;
 }
