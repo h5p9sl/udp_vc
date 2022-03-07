@@ -10,6 +10,7 @@
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 
+#include "../shared/networking.h"
 #include "../shared/polling.h"
 
 static const char *message_format = "<%s> %s\n";
@@ -187,10 +188,23 @@ int client_msg_send(int from, int to, char *str) {
   }
 
   if (client_list[to].fd >= 0) {
-    if (SSL_write(client_list[to].ssl, buf, strlen(buf)) <= 0) {
-      fprintf(stderr, "SSL_write failed for %s\n", username);
+
+    TextChatPacket *packet =
+        networking_new_txt_packet(buf, strnlen(buf, NET_MAX_PACKET_SIZE));
+
+    if (!packet) {
+      networking_print_error();
+      free(packet);
       return -1;
     }
+
+    if (!networking_try_send_packet_ssl(client_list[to].ssl, (PacketInterface*)packet)) {
+      networking_print_error();
+      free(packet);
+      return -1;
+    }
+
+    free(packet);
   }
   return 0;
 }

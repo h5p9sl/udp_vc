@@ -1,7 +1,3 @@
-#include <opus/opus.h>
-#include <pulse/error.h>
-#include <pulse/simple.h>
-
 #include <ctype.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -25,8 +21,14 @@
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 
-#include "../shared/polling.h"
+#ifndef USE_OPENSSL
+#define USE_OPENSSL
+#endif
+
 #include "../shared/config.h"
+#include "../shared/networking.h"
+#include "../shared/polling.h"
+#include "audio_system.h"
 
 static int socket_from_hints(struct addrinfo *hints, char *port, int *sockfd) {
   struct addrinfo *cur, *res;
@@ -51,6 +53,8 @@ static int socket_from_hints(struct addrinfo *hints, char *port, int *sockfd) {
     break;
   }
 
+  freeaddrinfo(res);
+
   if (cur == NULL) {
     fprintf(stderr, "Failed to find usable address.\n");
     perror("socket+bind");
@@ -61,7 +65,6 @@ static int socket_from_hints(struct addrinfo *hints, char *port, int *sockfd) {
           (hints->ai_socktype == SOCK_DGRAM) ? "Datagram" : "Stream", port,
           *sockfd);
 
-  freeaddrinfo(res);
   return 0;
 }
 
@@ -91,6 +94,10 @@ int init_sockets(int *tcpsock, int *udpsock) {
 
 void die(char *reason) {
   puts(reason);
+
+  /* Ensure no resource leaks can happen */
+  free_audio_system();
+
   exit(1);
 }
 
@@ -187,11 +194,22 @@ void init_ssl(SSL_CTX **pctx, SSL **pssl, int tcpsock) {
   }
 }
 
+// Temporary function
+void audio_stuff() {
+  init_audio_system();
+
+  free_audio_system();
+
+  exit(0);
+}
+
 int main(int argc, char *argv[]) {
   int tcpsock, udpsock;
 
   SSL_CTX *ctx;
   SSL *ssl;
+
+  // audio_stuff();
 
   printf("udp_vc client version %s\n", UDPVC_VERSION);
   if (argc < 3) {
@@ -242,33 +260,66 @@ int main(int argc, char *argv[]) {
         if (entry->fd == STDIN_FILENO) {
           ssize_t r;
 
-          if ((r = read(entry->fd, &buf, 255)) < 0) {
+          if ((r = read(entry->fd, &buf, sizeof(buf) - 1)) < 0) {
             perror("read");
             die("Failed to read stdin");
           }
 
-          if (SSL_write(ssl, buf, strlen(buf)) <= 0) {
-            ERR_print_errors_fp(stderr);
-            fprintf(stderr, "Failed to send message\n");
-          }
+          TextChatPacket *pkt = networking_new_txt_packet(buf, strlen(buf));
 
-        } else if (entry->fd == tcpsock) {
-          int r;
-
-          r = SSL_read(ssl, buf, sizeof(buf) - 1);
-
-          if (r < 0) {
-            fprintf(stderr, "Failed to read message from server, exiting.\n");
+          if (!pkt) {
+            networking_print_error();
             goto exit_peacefully;
           }
 
-          printf("%s", buf);
+          if (!networking_try_send_packet_ssl(ssl, (PacketInterface*)pkt)) {
+            networking_print_error();
+            free(pkt);
+            goto exit_peacefully;
+          }
+
+          free(pkt);
+
+        } else {
+          bool is_ssl = (SSL_get_fd(ssl) == entry->fd);
+          IPacketUnion packet; // union of polymorphic pointers
+
+          if (is_ssl)
+            packet.base = networking_try_read_packet_ssl(ssl);
+          else
+            packet.base = networking_try_read_packet_fd(entry->fd);
+
+          if (!packet.base) {
+            networking_print_error();
+            printf("Failed to read packet from server.\n");
+            goto exit_peacefully;
+          }
+
+          switch (packet.base->type) {
+          case PACKET_TEXT_CHAT:
+            printf("%s", packet.txt->text_cstr);
+            break;
+          case PACKET_VOICE_CHAT:
+            /*audiosystem_feed_opus(&packet.vc->opus_data,
+                                  packet.vc->opus_data_len, packet.vc->user_id);
+                                  */
+            break;
+          default:
+            fprintf(stderr, "Invalid packet type: %u", packet.base->type);
+            free(packet.base);
+            goto exit_peacefully;
+            break;
+          }
+
+          free(packet.base);
         }
       }
     }
   }
 
 exit_peacefully:
+  free_audio_system();
+
   SSL_shutdown(ssl);
   SSL_free(ssl);
   SSL_CTX_free(ctx);
