@@ -1,0 +1,34 @@
+# Generated certificates and keys
+*.cert
+*.csr
+*.pem
+
+# CMake generated
+CMakeLists.txt.user
+CMakeCache.txt
+CMakeFiles
+CMakeScripts
+Testing
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps
+
+# Binaries
+bin/
+lib/
+Debug/
+Release/
+
+# IDE generated files and folders
+Debug/
+Release/
+.vs/
+.idea/
+
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
