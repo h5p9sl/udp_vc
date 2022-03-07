@@ -10,7 +10,7 @@
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 
-#include "polling.h"
+#include "../shared/polling.h"
 
 static const char *message_format = "<%s> %s\n";
 

@@ -26,7 +26,9 @@
 #include <openssl/ssl.h>
 
 #include "client_list.h"
-#include "polling.h"
+
+#include "../shared/config.h"
+#include "../shared/polling.h"
 
 static const char *str_port = "6060";
 
@@ -146,6 +148,7 @@ int main() {
   init_ssl_ctx(&ctx);
   clientlist_init();
 
+  printf("udp_vc server version %s\n", UDPVC_VERSION);
   if (init_sockets(&listener, &vcsock) < 0)
     return 1;
 

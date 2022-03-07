@@ -25,7 +25,8 @@
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 
-#include "polling.h"
+#include "../shared/polling.h"
+#include "../shared/config.h"
 
 static int socket_from_hints(struct addrinfo *hints, char *port, int *sockfd) {
   struct addrinfo *cur, *res;
@@ -140,50 +141,49 @@ int user_confirm_peer(SSL *ssl) {
   return 1;
 }
 
-void init_ssl(SSL_CTX **pctx, SSL **pssl) {
-  SSL_ctx *ctx;
+void init_ssl(SSL_CTX **pctx, SSL **pssl, int tcpsock) {
+  SSL_CTX *ctx;
   SSL *ssl;
 
   *pctx = SSL_CTX_new(TLS_client_method());
   if (!*pctx) {
     ERR_print_errors_fp(stderr);
-    return 1;
+    die("SSL_CTX_new failed");
   }
-  ctx = *ptx;
+  ctx = *pctx;
 
   *pssl = SSL_new(ctx);
   if (!*pssl) {
     ERR_print_errors_fp(stderr);
-    return 1;
+    die("SSL_new failed");
   }
   ssl = *pssl;
 
   if (SSL_use_certificate_file(ssl, "client.cert", SSL_FILETYPE_PEM) != 1) {
     ERR_print_errors_fp(stderr);
-    return 1;
+    die("SSL_use_certificate_file failed");
   }
 
   if (SSL_use_PrivateKey_file(ssl, "client.pem", SSL_FILETYPE_PEM) != 1) {
     ERR_print_errors_fp(stderr);
-    return 1;
+    die("SSL_use_privateKey_file failed");
   }
 
   if (SSL_check_private_key(ssl) != 1) {
     fprintf(stderr, "Private key and certificate is not mathichng\n");
-    return 1;
+    die("SSL_check_private_key failed");
   }
 
   if (!SSL_set_fd(ssl, tcpsock)) {
     ERR_print_errors_fp(stderr);
-    return 1;
+    die("SSL_set_fd failed");
   }
 
   SSL_set_connect_state(ssl);
 
   if (SSL_connect(ssl) <= 0) {
     ERR_print_errors_fp(stderr);
-    fprintf(stderr, "SSL handshake failed\n");
-    return 1;
+    die("SSL handshake failed");
   }
 }
 
@@ -193,6 +193,7 @@ int main(int argc, char *argv[]) {
   SSL_CTX *ctx;
   SSL *ssl;
 
+  printf("udp_vc client version %s\n", UDPVC_VERSION);
   if (argc < 3) {
     printf("Usage: %s <hostname> <port>\n", argv[0]);
     return 0;
@@ -201,7 +202,7 @@ int main(int argc, char *argv[]) {
   if (init_sockets(&tcpsock, &udpsock) < 0)
     die("init_sockets");
 
-  init_ssl(ctx, ssl);
+  init_ssl(&ctx, &ssl, tcpsock);
 
   pollingsystem_init();
   pollingsystem_create_entry(STDIN_FILENO, POLLIN);

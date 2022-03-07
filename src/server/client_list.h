@@ -1,6 +1,6 @@
 #ifndef _CLIENT_LIST_H_
 #include <openssl/ssl.h>
-#include "polling.h"
+#include "../shared/polling.h"
 
 #define MAX_CLIENTS 16
 
