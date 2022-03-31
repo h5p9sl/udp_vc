@@ -6,7 +6,9 @@ project(udp-vc
   LANGUAGES C CXX
 )
 
-set(PROJECT_SOURCE_DIR src)
+option(UDPVC_BUILD_TESTS "Build test binaries" OFF)
+
+set(PROJECT_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -18,10 +20,15 @@ configure_file(
 
 find_package(OpenSSL REQUIRED)
 
-add_subdirectory(extern)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/extern)
 add_subdirectory(${PROJECT_SOURCE_DIR}/shared)
 add_subdirectory(${PROJECT_SOURCE_DIR}/client)
 add_subdirectory(${PROJECT_SOURCE_DIR}/server)
+
+if (${UDPVC_BUILD_TESTS})
+  enable_testing()
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tests)
+endif()
 
 target_include_directories(udpvc-client PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}

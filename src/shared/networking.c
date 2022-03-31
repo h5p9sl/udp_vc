@@ -1,18 +1,19 @@
 #include "networking.h"
 
 #include <arpa/inet.h>
+#include <errno.h>
+#include <openssl/err.h>
 #include <openssl/ssl.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
-#define NETWORKING_ERROR(x, y)                                                 \
-  {                                                                            \
-    last_error = x;                                                            \
-    error_string = y;                                                          \
-  }
+#define NETWORKING_ERROR (networking_raise_error)
+
 #define ASSERT_PACKET_TYPE(x, y)                                               \
   if (x != y) {                                                                \
-    NETWORKING_ERROR(WRONG_PACKET_TYPE, NULL)                                  \
+    NETWORKING_ERROR(WRONG_PACKET_TYPE, NULL);                                 \
     return NULL;                                                               \
   }
 
@@ -26,7 +27,7 @@ enum NetworkingErrorCode {
 };
 
 static enum NetworkingErrorCode last_error = NO_ERROR;
-static char const *error_string = NULL;
+static char *error_string = NULL;
 
 #define IO_USING_FD (0)
 #define IO_USING_SSL (1)
@@ -102,6 +103,25 @@ void networking_print_error() {
   }
   fprintf(stderr, "Networking Error %i (%s) : %s\n", last_error, err_type_str,
           get_error_string());
+}
+
+void networking_raise_error(int type, const char *fmt, ...) {
+  va_list ap;
+  char *buf;
+
+  if (type != NO_ERROR) {
+    buf = malloc(256);
+
+    va_start(ap, fmt);
+    vsprintf(buf, fmt, ap);
+    va_end(ap);
+  }
+
+  if (error_string)
+    free(error_string);
+
+  last_error = type;
+  error_string = buf;
 }
 
 VoiceChatPacket *networking_vc_unpack(PacketInterface *packet) {
@@ -213,15 +233,22 @@ void *networking_pack(PacketInterface *packet) {
 
 PacketInterface *try_read(struct TryData *ctx) {
   PacketInterface *packet;
-  signed long r;
-  unsigned long read;
+  const char *subroutine_err = NULL;
 
-  inline signed long read_subroutine(void *ptr, unsigned long length) {
+  inline int read_subroutine(void *ptr, unsigned long length) {
+    int result;
+
     switch (ctx->method) {
     case IO_USING_FD:
-      return recv(ctx->io.fd, ptr, length, 0);
+      result = read(ctx->io.fd, ptr, length);
+      if (result < 0)
+        subroutine_err = strerror(errno);
+      return result;
     case IO_USING_SSL:
-      return SSL_read(ctx->io.ssl, ptr, length);
+      result = SSL_read(ctx->io.ssl, ptr, length);
+      if (result < 0)
+        subroutine_err = ERR_lib_error_string(ERR_get_error());
+      return result;
     }
   }
 
@@ -234,12 +261,13 @@ PacketInterface *try_read(struct TryData *ctx) {
   }
 
   /* Read the first portion of the packet, the "header" */
-  read = 0;
+  signed long r;
+  unsigned long read = 0;
   do {
     r = read_subroutine((void *)((uintptr_t)packet + read),
                         sizeof(PacketInterface) - read);
     if (r < 0) {
-      NETWORKING_ERROR(IO_ERROR, "Read failed in try_read");
+      NETWORKING_ERROR(IO_ERROR, "Read failed in try_read: %s", subroutine_err);
       free(packet);
       return NULL;
     } else if (r == 0) {
@@ -285,13 +313,22 @@ PacketInterface *try_read(struct TryData *ctx) {
 
 PacketInterface *try_send(struct TryData *ctx, PacketInterface *packet) {
   unsigned long sent;
+  const char *subroutine_err = NULL;
 
-  inline signed long write_subroutine(void *ptr, unsigned long length) {
+  inline int write_subroutine(void *ptr, unsigned long length) {
+    int result;
+
     switch (ctx->method) {
     case IO_USING_FD:
-      return send(ctx->io.fd, ptr, length, 0);
+      result = write(ctx->io.fd, ptr, length);
+      if (result < 0)
+        subroutine_err = strerror(errno);
+      return result;
     case IO_USING_SSL:
-      return SSL_write(ctx->io.ssl, ptr, length);
+      result = SSL_write(ctx->io.ssl, ptr, length);
+      if (result < 0)
+        subroutine_err = ERR_lib_error_string(ERR_get_error());
+      return result;
     }
   }
 
@@ -311,7 +348,8 @@ PacketInterface *try_send(struct TryData *ctx, PacketInterface *packet) {
     r = write_subroutine((void *)((uintptr_t)packet + sent),
                          total_length - sent);
     if (r < 0) {
-      NETWORKING_ERROR(IO_ERROR, "Sending failed in try_send");
+      NETWORKING_ERROR(IO_ERROR, "Sending failed in try_send: %s",
+                       subroutine_err);
       return NULL;
     }
     sent += r;
@@ -396,8 +434,8 @@ VoiceChatPacket *networking_new_vc_packet(const unsigned char *opus_data,
   }
 
   PacketInterface base = {
-    .type = PACKET_VOICE_CHAT,
-    .inner_data_len = packet_size - sizeof(PacketInterface),
+      .type = PACKET_VOICE_CHAT,
+      .inner_data_len = packet_size - sizeof(PacketInterface),
   };
 
   result = (VoiceChatPacket *)calloc(1, packet_size);

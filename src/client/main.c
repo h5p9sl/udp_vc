@@ -96,7 +96,7 @@ void die(char *reason) {
   puts(reason);
 
   /* Ensure no resource leaks can happen */
-  free_audio_system();
+  audiosystem_free();
 
   exit(1);
 }
@@ -196,9 +196,9 @@ void init_ssl(SSL_CTX **pctx, SSL **pssl, int tcpsock) {
 
 // Temporary function
 void audio_stuff() {
-  init_audio_system();
+  audiosystem_init();
 
-  free_audio_system();
+  audiosystem_free();
 
   exit(0);
 }
@@ -210,6 +210,7 @@ int main(int argc, char *argv[]) {
   SSL *ssl;
 
   // audio_stuff();
+  audiosystem_init();
 
   printf("udp_vc client version %s\n", UDPVC_VERSION);
   if (argc < 3) {
@@ -255,6 +256,40 @@ int main(int argc, char *argv[]) {
       char buf[256];
       memset(buf, 0, sizeof(buf));
 
+      if (entry->revents & POLLOUT) {
+        if (entry->fd == udpsock) {
+          unsigned short len;
+          unsigned char *opus_data;
+          VoiceChatPacket *pkt;
+
+          if (audiosystem_get_opus(&opus_data, &len) < 0) {
+            fprintf(stderr, "Error occurred while getting opus data from audio system\n");
+            goto exit_peacefully;
+          }
+
+          if (!len) /* no data is ready */
+            continue;
+
+          pkt = networking_new_vc_packet(opus_data, len);
+
+          if (!pkt) {
+            networking_print_error();
+            fprintf(stderr, "Failed to create VC packet\n");
+            goto exit_peacefully;
+          }
+
+          if (!networking_try_send_packet_fd(udpsock,
+                                             (PacketInterface *)pkt)) {
+            networking_print_error();
+            fprintf(stderr, "Failed to send VC packet\n");
+            free(pkt);
+            goto exit_peacefully;
+          }
+
+          free(pkt);
+        }
+      }
+
       if (entry->revents & POLLIN) {
 
         if (entry->fd == STDIN_FILENO) {
@@ -272,7 +307,7 @@ int main(int argc, char *argv[]) {
             goto exit_peacefully;
           }
 
-          if (!networking_try_send_packet_ssl(ssl, (PacketInterface*)pkt)) {
+          if (!networking_try_send_packet_ssl(ssl, (PacketInterface *)pkt)) {
             networking_print_error();
             free(pkt);
             goto exit_peacefully;
@@ -291,7 +326,7 @@ int main(int argc, char *argv[]) {
 
           if (!packet.base) {
             networking_print_error();
-            printf("Failed to read packet from server.\n");
+            fprintf(stderr, "Failed to read packet from server.\n");
             goto exit_peacefully;
           }
 
@@ -300,9 +335,8 @@ int main(int argc, char *argv[]) {
             printf("%s", packet.txt->text_cstr);
             break;
           case PACKET_VOICE_CHAT:
-            /*audiosystem_feed_opus(&packet.vc->opus_data,
+            audiosystem_feed_opus(packet.vc->opus_data,
                                   packet.vc->opus_data_len, packet.vc->user_id);
-                                  */
             break;
           default:
             fprintf(stderr, "Invalid packet type: %u", packet.base->type);
@@ -318,7 +352,7 @@ int main(int argc, char *argv[]) {
   }
 
 exit_peacefully:
-  free_audio_system();
+  audiosystem_free();
 
   SSL_shutdown(ssl);
   SSL_free(ssl);
