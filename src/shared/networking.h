@@ -27,17 +27,23 @@ enum PacketType { PACKET_NONE = 0, PACKET_TEXT_CHAT, PACKET_VOICE_CHAT };
  * \see IPacketUnion
  *
  * */
+#pragma pack(push, 2)
 typedef struct {
   /*! The packet type.
    * \see PacketType */
   uint8_t type;
+
+  uint8_t unused;
+
   /*! Allows the user to know how much memory to allocate
    * for the subsequent packet data. This value should never
    * exceed NET_MAX_PACKET_SIZE - sizeof(PacketInterface).
    * */
   uint16_t inner_data_len;
 } PacketInterface;
+#pragma pack(pop)
 
+#pragma pack(push, 2)
 typedef struct {
   PacketInterface base;
 
@@ -47,7 +53,9 @@ typedef struct {
   unsigned char opus_data[];
 
 } VoiceChatPacket;
+#pragma pack(pop)
 
+#pragma pack(push, 2)
 typedef struct {
   PacketInterface base;
 
@@ -55,6 +63,7 @@ typedef struct {
   char text_cstr[];
 
 } TextChatPacket;
+#pragma pack(pop)
 
 /*! \brief Union struct for easier `PacketInterface` handling.
  *

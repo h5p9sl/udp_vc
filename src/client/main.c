@@ -6,6 +6,7 @@
 #ifndef __USE_MISC
 #define __USE_MISC
 #endif
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -29,6 +30,8 @@
 #include "../shared/networking.h"
 #include "../shared/polling.h"
 #include "audio_system.h"
+
+static void handle_signal(int signum);
 
 static int socket_from_hints(struct addrinfo *hints, char *port, int *sockfd);
 static void die(char *reason);
@@ -55,6 +58,17 @@ static int on_packet_received(PacketInterface *packet);
 /* Called whenever voice chat data is ready to be sent out */
 static int on_voice_out_ready(const unsigned char *opus_data,
                               const unsigned short len);
+
+static void handle_signal(int signum) {
+  switch (signum) {
+  case SIGINT:
+    puts("Exiting peacefully...");
+    if (app_ctx.initialized)
+      free_app_ctx(&app_ctx);
+    exit(0);
+    break;
+  }
+}
 
 static void init_app_ctx(struct ApplicationCtx *ctx) {
   init_sockets(&ctx->tcpsock, &ctx->udpsock);
@@ -321,16 +335,16 @@ void audio_stuff() {
 }
 
 int main(int argc, char *argv[]) {
-  init_app_ctx(&app_ctx);
-
-  // audio_stuff();
-  audiosystem_init();
+  if (signal(SIGINT, &handle_signal) == SIG_ERR)
+    perror("signal");
 
   printf("udp_vc client version %s\n", UDPVC_VERSION);
   if (argc < 3) {
     printf("Usage: %s <hostname> <port>\n", argv[0]);
     return 0;
   }
+
+  init_app_ctx(&app_ctx);
 
   pollingsystem_init();
   pollingsystem_create_entry(STDIN_FILENO, POLLIN);
@@ -422,7 +436,6 @@ int main(int argc, char *argv[]) {
   }
 
 exit_peacefully:
-  audiosystem_free();
   free_app_ctx(&app_ctx);
   return 0;
 }

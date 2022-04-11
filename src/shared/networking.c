@@ -108,20 +108,23 @@ void networking_print_error() {
 void networking_raise_error(int type, const char *fmt, ...) {
   va_list ap;
   char *buf;
+  size_t len = 256;
 
-  if (type != NO_ERROR) {
-    buf = malloc(256);
+  last_error = type;
+  if (type == NO_ERROR)
+    return;
 
-    va_start(ap, fmt);
-    vsprintf(buf, fmt, ap);
-    va_end(ap);
-  }
+  buf = malloc(len);
+  memset(buf, 0, len);
+
+  va_start(ap, fmt);
+  vsnprintf(buf, len, fmt, ap);
+  va_end(ap);
 
   if (error_string)
     free(error_string);
 
-  last_error = type;
-  error_string = buf;
+  error_string = strdup(buf);
 }
 
 VoiceChatPacket *networking_vc_unpack(PacketInterface *packet) {
@@ -261,7 +264,7 @@ PacketInterface *try_read(struct TryData *ctx) {
   }
 
   /* Read the first portion of the packet, the "header" */
-  signed long r;
+  signed long r = 0;
   unsigned long read = 0;
   do {
     r = read_subroutine((void *)((uintptr_t)packet + read),

@@ -181,7 +181,7 @@ int main() {
         if (entry->fd == STDIN_FILENO) {
 
           char buf[256];
-          memset(buf, 0, 256);
+          memset(buf, 0, sizeof(buf));
           if (read(entry->fd, buf, 255) > 0) {
             client_msg_sendall(-1, buf);
           }

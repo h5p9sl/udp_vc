@@ -76,7 +76,6 @@ int clientlist_delete_client(int index) {
     close(client->fd);
 
   memcpy(client, &invalid_client, sizeof(ClientConnection));
-
   num_clients--;
   return index;
 }
@@ -100,6 +99,8 @@ void init_ssl(SSL *ssl) {
  * polling */
 int clientlist_create_client(int newfd) {
   int index = -1;
+  ClientConnection client;
+  SSL_CTX *ctx;
 
   for (int i = 0; i < MAX_CLIENTS; i++) {
     if (!is_valid_client(i)) {
@@ -108,21 +109,25 @@ int clientlist_create_client(int newfd) {
     }
   }
 
-  ClientConnection *client = &client_list[index];
-  client->fd = newfd;
-
-  client->pollsys_id = pollingsystem_create_entry(newfd, POLLIN);
+  memcpy(&client, &invalid_client, sizeof(ClientConnection));
 
   /* CTX_new(3ssl): "An SSL_CTX object is reference counted." */
-  SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
+  ctx = SSL_CTX_new(TLS_server_method());
+  if (!ctx) {
+    fprintf(stderr, "SSL context creation failed\n");
+    return -1;
+  }
 
-  /* Create a new SSL session */
-  client->ssl = SSL_new(ctx);
-  SSL_set_fd(client->ssl, newfd);
-  init_ssl(client->ssl);
+  client.ssl = SSL_new(ctx);
+  if (!client.ssl) {
+    fprintf(stderr, "SSL object creation failed\n");
+    return -1;
+  }
 
-  // if (SSL_do_handshake(ssl) <= 0) {
-  if (SSL_accept(client->ssl) <= 0) {
+  SSL_set_fd(client.ssl, newfd);
+  init_ssl(client.ssl);
+
+  if (SSL_accept(client.ssl) <= 0) {
     char ipstr[INET6_ADDRSTRLEN] = {'\0'};
 
     get_client_ipstr(newfd, ipstr, sizeof ipstr);
@@ -134,17 +139,23 @@ int clientlist_create_client(int newfd) {
             "connection.\n",
             ipstr);
 
-    clientlist_delete_client(index);
+    close(newfd);
     return -1;
   }
 
+  client.fd = newfd;
+  client.pollsys_id = pollingsystem_create_entry(newfd, POLLIN);
+
   num_clients++;
+  memcpy(&client_list[index], &client, sizeof(ClientConnection));
   return index;
 }
 
 int get_client_ipstr(int fd, char *buf, size_t len) {
   struct sockaddr_storage ip;
   socklen_t iplen = sizeof ip;
+
+  memset(&ip, 0, sizeof(struct sockaddr_storage));
 
   getpeername(fd, (struct sockaddr *)&ip, &iplen);
   if (inet_ntop(ip.ss_family, SOCKADDRSTORAGE_GET_SINADDR(ip), buf, len) ==
@@ -198,7 +209,8 @@ int client_msg_send(int from, int to, char *str) {
       return -1;
     }
 
-    if (!networking_try_send_packet_ssl(client_list[to].ssl, (PacketInterface*)packet)) {
+    if (!networking_try_send_packet_ssl(client_list[to].ssl,
+                                        (PacketInterface *)packet)) {
       networking_print_error();
       free(packet);
       return -1;
