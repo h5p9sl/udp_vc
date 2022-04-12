@@ -29,6 +29,7 @@
 
 #include "../shared/config.h"
 #include "../shared/polling.h"
+#include "../shared/networking.h"
 
 static const char *str_port = "6060";
 
@@ -180,7 +181,7 @@ int main() {
         if (entry->fd == STDIN_FILENO) {
 
           char buf[256];
-          memset(buf, 0, 256);
+          memset(buf, 0, sizeof(buf));
           if (read(entry->fd, buf, 255) > 0) {
             client_msg_sendall(-1, buf);
           }
@@ -207,7 +208,7 @@ int main() {
 
         } else { /* Message recieved from client */
 
-          int uid, r;
+          int uid;
           char buf[256];
 
           uid = clientlist_get_client_index(entry->fd);
@@ -221,12 +222,23 @@ int main() {
                 uid);
 
           memset(buf, 0, sizeof(buf));
-          r = SSL_read(client_list[uid].ssl, buf, sizeof(buf) - 1);
 
-          if (r > 0) {
-            /* Successful read */
-            client_msg_sendall(uid, buf);
-          } else {
+          IPacketUnion packet; // union of polymorphic pointers
+          packet.base = networking_try_read_packet_ssl(client_list[uid].ssl);
+
+          if (!packet.base && networking_get_error() != 0) {
+            /* Critical error */
+            networking_print_error();
+            clientlist_delete_client(uid);
+
+            char ipstr[INET6_ADDRSTRLEN];
+
+            memset(ipstr, 0, sizeof(ipstr));
+            get_client_ipstr(entry->fd, ipstr, sizeof ipstr);
+            snprintf(buf, sizeof buf, "Connection closed with %s (Error %i occurred)\n", ipstr, networking_get_error());
+            client_msg_sendall(-1, buf);
+          }
+          else if (!packet.base) {
             /* Connection closed */
             char ipstr[INET6_ADDRSTRLEN];
 
@@ -237,6 +249,11 @@ int main() {
             snprintf(buf, sizeof buf, "Connection closed with %s\n", ipstr);
             client_msg_sendall(-1, buf);
           }
+          else {
+            /* Successful read */
+            client_msg_sendall(uid, packet.txt->text_cstr);
+          }
+
         }
       }
     }

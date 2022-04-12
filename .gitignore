@@ -16,6 +16,9 @@ compile_commands.json
 CTestTestfile.cmake
 _deps
 
+cmake
+docs
+
 # Binaries
 bin/
 lib/
