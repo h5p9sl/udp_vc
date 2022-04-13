@@ -33,12 +33,15 @@
 
 static void handle_signal(int signum);
 
-static int socket_from_hints(struct addrinfo *hints, char *port, int *sockfd);
 static void die(char *reason);
-static void tohex(unsigned char *in, size_t insz, char *out, size_t outsz);
-static int user_confirm_peer(SSL *ssl);
+static void exit_if_nonzero(int retval);
+
+static int socket_from_hints(struct addrinfo *hints, char *port, int *sockfd);
 static void init_sockets(int *tcpsock, int *udpsock);
 static void init_ssl(SSL_CTX **pctx, SSL **pssl, int tcpsock);
+
+static void tohex(unsigned char *in, size_t insz, char *out, size_t outsz);
+static int user_confirm_peer(SSL *ssl);
 
 static struct ApplicationCtx {
   bool initialized;
@@ -53,11 +56,86 @@ static void free_app_ctx(struct ApplicationCtx *ctx);
 
 /* Wrapper for command processing and sending text packet, depending on the
  * input */
+static int read_user_input();
 static int on_user_input(const char *line, const size_t length);
 static int on_packet_received(PacketInterface *packet);
 /* Called whenever voice chat data is ready to be sent out */
 static int on_voice_out_ready(const unsigned char *opus_data,
                               const unsigned short len);
+
+static int read_user_input() {
+  char buf[256];
+  ssize_t r;
+
+  memset(buf, 0, sizeof(buf));
+
+  if ((r = read(STDIN_FILENO, &buf, sizeof(buf) - 1)) < 0) {
+    perror("read");
+    die("Failed to read stdin");
+  }
+
+  if (on_user_input(buf, strnlen(buf, sizeof(buf))) < 0)
+    return -1;
+
+  return 0;
+}
+
+static int on_pollin(struct pollfd *entry) {
+
+  if (entry->fd == STDIN_FILENO)
+    return read_user_input();
+
+  bool is_ssl = (SSL_get_fd(app_ctx.ssl) == entry->fd);
+  IPacketUnion packet; // union of polymorphic pointers
+
+  if (is_ssl)
+    packet.base = networking_try_read_packet_ssl(app_ctx.ssl);
+  else
+    packet.base = networking_try_read_packet_fd(entry->fd);
+
+  if (!packet.base) {
+    networking_print_error();
+    fprintf(stderr, "Failed to read packet from server.\n");
+    return -1;
+  }
+
+  if (on_packet_received(packet.base) < 0)
+    return -1;
+
+  free(packet.base);
+  return 0;
+}
+
+static int on_pollout(struct pollfd *entry) {
+  if (entry->fd == app_ctx.udpsock) {
+    unsigned short len;
+    unsigned char *opus_data;
+
+    if (audiosystem_get_opus(&opus_data, &len) < 0) {
+      fprintf(stderr,
+              "Error occurred while getting opus data from audio system\n");
+      return -1;
+    }
+
+    if (!len) /* no data is ready */
+      return 0;
+
+    if (on_voice_out_ready(opus_data, len) < 0)
+      return -1;
+  }
+
+  return 0;
+}
+
+static int on_pollerr(struct pollfd *entry) {
+  fprintf(stderr, "POLLERR recieved for fd %i.\n", entry->fd);
+  return -1;
+}
+
+static int on_pollhup(struct pollfd *entry) {
+  fprintf(stderr, "POLLHUP recieved for fd %i.\n", entry->fd);
+  return -1;
+}
 
 static void handle_signal(int signum) {
   switch (signum) {
@@ -89,18 +167,6 @@ static void free_app_ctx(struct ApplicationCtx *ctx) {
 
 static int on_user_input(const char *line, const size_t length) {
   TextChatPacket *pkt;
-
-  /* something like this for the command system
-   *
-  switch (commandsystem_try_command(line, length)) {
-  case COMMAND_NOT_PREFIXED:
-  case COMMAND_NOT_FOUND:
-    break;
-  case COMMAND_SUCCESS:
-    commandsystem_execute(line, length);
-    return 0;
-  }
-  */
 
   pkt = networking_new_txt_packet(line, length);
 
@@ -232,6 +298,13 @@ static void die(char *reason) {
   exit(1);
 }
 
+static void exit_if_nonzero(int retval) {
+  if (retval != 0) {
+    free_app_ctx(&app_ctx);
+    exit(0);
+  }
+}
+
 static void tohex(unsigned char *in, size_t insz, char *out, size_t outsz) {
   unsigned char *pin = in;
   const char *hex = "0123456789ABCDEF";
@@ -269,7 +342,7 @@ static int user_confirm_peer(SSL *ssl) {
   char buf[256];
   ssize_t r = read(STDIN_FILENO, buf, 255);
   if (r < 0) {
-    perror("getline");
+    perror("read");
     return -1;
   }
 
@@ -356,7 +429,8 @@ int main(int argc, char *argv[]) {
     break;
   case 0:
     fprintf(stderr, "User did not trust peer, exiting.\n");
-    goto exit_peacefully;
+    free_app_ctx(&app_ctx);
+    return 0;
   }
 
   puts("Connected. To start/stop transmitting your "
@@ -372,70 +446,24 @@ int main(int argc, char *argv[]) {
       die("pollingsystem_poll");
     }
 
-    entry = pollingsystem_next(NULL);
-    for (; entry != NULL; entry = pollingsystem_next(entry)) {
-      char buf[256];
-      memset(buf, 0, sizeof(buf));
+    for (entry = pollingsystem_next(NULL); entry != NULL;
+         entry = pollingsystem_next(entry)) {
+      int revents = entry->revents;
 
-      if (entry->revents & POLLOUT) {
-        if (entry->fd == app_ctx.udpsock) {
-          unsigned short len;
-          unsigned char *opus_data;
+      if (revents & POLLIN)
+        exit_if_nonzero(on_pollin(entry));
 
-          if (audiosystem_get_opus(&opus_data, &len) < 0) {
-            fprintf(
-                stderr,
-                "Error occurred while getting opus data from audio system\n");
-            goto exit_peacefully;
-          }
+      if (revents & POLLOUT)
+        exit_if_nonzero(on_pollout(entry));
 
-          if (!len) /* no data is ready */
-            continue;
+      if (revents & POLLERR)
+        exit_if_nonzero(on_pollerr(entry));
 
-          if (on_voice_out_ready(opus_data, len) < 0)
-            goto exit_peacefully;
-        }
-      }
-
-      if (entry->revents & POLLIN) {
-
-        if (entry->fd == STDIN_FILENO) {
-          ssize_t r;
-
-          if ((r = read(entry->fd, &buf, sizeof(buf) - 1)) < 0) {
-            perror("read");
-            die("Failed to read stdin");
-          }
-
-          if (on_user_input(buf, strnlen(buf, sizeof(buf))) < 0)
-            goto exit_peacefully;
-
-        } else {
-
-          bool is_ssl = (SSL_get_fd(app_ctx.ssl) == entry->fd);
-          IPacketUnion packet; // union of polymorphic pointers
-
-          if (is_ssl)
-            packet.base = networking_try_read_packet_ssl(app_ctx.ssl);
-          else
-            packet.base = networking_try_read_packet_fd(entry->fd);
-
-          if (!packet.base) {
-            networking_print_error();
-            fprintf(stderr, "Failed to read packet from server.\n");
-            goto exit_peacefully;
-          }
-
-          if (on_packet_received(packet.base) < 0)
-            goto exit_peacefully;
-
-          free(packet.base);
-        }
-      }
+      if (revents & POLLHUP)
+        exit_if_nonzero(on_pollhup(entry));
     }
   }
 
-exit_peacefully:
   free_app_ctx(&app_ctx);
   return 0;
 }
