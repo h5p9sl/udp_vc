@@ -36,8 +36,10 @@ static void handle_signal(int signum);
 static void die(char *reason);
 static void exit_if_nonzero(int retval);
 
-static int socket_from_hints(struct addrinfo *hints, char *port, int *sockfd);
-static void init_sockets(int *tcpsock, int *udpsock);
+static int socket_from_hints(struct addrinfo *hints, const char *address,
+                             const char *port, int *sockfd);
+static void init_sockets(const char *address, const char *port, int *tcpsock,
+                         int *udpsock);
 static void init_ssl(SSL_CTX **pctx, SSL **pssl, int tcpsock);
 
 static void tohex(unsigned char *in, size_t insz, char *out, size_t outsz);
@@ -51,7 +53,8 @@ static struct ApplicationCtx {
   SSL *ssl;
 } app_ctx;
 
-static void init_app_ctx(struct ApplicationCtx *ctx);
+static void init_app_ctx(const char *address, const char *port,
+                         struct ApplicationCtx *ctx);
 static void free_app_ctx(struct ApplicationCtx *ctx);
 
 /* Wrapper for command processing and sending text packet, depending on the
@@ -148,8 +151,9 @@ static void handle_signal(int signum) {
   }
 }
 
-static void init_app_ctx(struct ApplicationCtx *ctx) {
-  init_sockets(&ctx->tcpsock, &ctx->udpsock);
+static void init_app_ctx(const char *address, const char *port,
+                         struct ApplicationCtx *ctx) {
+  init_sockets(address, port, &ctx->tcpsock, &ctx->udpsock);
   init_ssl(&ctx->ssl_ctx, &ctx->ssl, ctx->tcpsock);
   ctx->initialized = true;
 }
@@ -229,11 +233,12 @@ static int on_voice_out_ready(const unsigned char *opus_data,
   return 0;
 }
 
-static int socket_from_hints(struct addrinfo *hints, char *port, int *sockfd) {
+static int socket_from_hints(struct addrinfo *hints, const char *address,
+                             const char *port, int *sockfd) {
   struct addrinfo *cur, *res;
   int status;
 
-  if ((status = getaddrinfo(NULL, port, hints, &res)) != 0) {
+  if ((status = getaddrinfo(address, port, hints, &res)) != 0) {
     fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(status));
     return -1;
   }
@@ -267,7 +272,8 @@ static int socket_from_hints(struct addrinfo *hints, char *port, int *sockfd) {
   return 0;
 }
 
-static void init_sockets(int *tcpsock, int *udpsock) {
+static void init_sockets(const char *address, const char *port, int *tcpsock,
+                         int *udpsock) {
   struct addrinfo hints;
 
   memset(&hints, 0, sizeof hints);
@@ -276,7 +282,7 @@ static void init_sockets(int *tcpsock, int *udpsock) {
   hints.ai_protocol = 0;       /* Use ai_socktype */
   hints.ai_flags = AI_PASSIVE; /* Use bindable wildcard address */
 
-  if (socket_from_hints(&hints, "6060", tcpsock) < 0)
+  if (socket_from_hints(&hints, address, port, tcpsock) < 0)
     die("Failed to initialize STREAM socket on port 6060");
 
   // NOTE: AI_PASSIVE flag *breaks* DGRAM sockets.
@@ -284,7 +290,8 @@ static void init_sockets(int *tcpsock, int *udpsock) {
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_DGRAM;
 
-  if (socket_from_hints(&hints, "6061", udpsock) < 0)
+  /* FIXME: consider asking for a valid UDP port from the server */
+  if (socket_from_hints(&hints, address, "6061", udpsock) < 0)
     die("Failed to initialize DGRAM socket on port 6061");
 }
 
@@ -408,6 +415,8 @@ void audio_stuff() {
 }
 
 int main(int argc, char *argv[]) {
+  char *hostname, *port;
+
   if (signal(SIGINT, &handle_signal) == SIG_ERR)
     perror("signal");
 
@@ -417,7 +426,10 @@ int main(int argc, char *argv[]) {
     return 0;
   }
 
-  init_app_ctx(&app_ctx);
+  hostname = argv[1];
+  port = argv[2];
+
+  init_app_ctx(hostname, port, &app_ctx);
 
   pollingsystem_init();
   pollingsystem_create_entry(STDIN_FILENO, POLLIN);
@@ -438,6 +450,7 @@ int main(int argc, char *argv[]) {
   puts("To use text chat, type something and press enter.");
 
   while (1) {
+    struct PollResult *result;
     struct pollfd *entry;
 
     int num_results = pollingsystem_poll();
@@ -446,8 +459,10 @@ int main(int argc, char *argv[]) {
       die("pollingsystem_poll");
     }
 
-    for (entry = pollingsystem_next(NULL); entry != NULL;
-         entry = pollingsystem_next(entry)) {
+    for (result = pollingsystem_next(NULL); result != NULL;
+         result = pollingsystem_next(result)) {
+      entry = &result->entry;
+
       int revents = entry->revents;
 
       if (revents & POLLIN)

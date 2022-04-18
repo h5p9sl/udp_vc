@@ -10,16 +10,14 @@
 
 typedef struct {
   struct pollfd *fds;
-  unsigned short size;
+  int size;
 
-  struct pollfd *poll_results; /* cached poll results */
-  unsigned short poll_results_len;
+  struct PollResult *poll_results; /* cached poll results */
+  int poll_results_len;
+
 } PollingSystem;
 
-static PollingSystem polling_system = {
-    .fds = NULL,
-    .size = 0,
-};
+static PollingSystem polling_system = {0};
 
 char is_valid_entry(pollsys_handle_t index) {
   return index >= 0 && index < polling_system.size &&
@@ -35,22 +33,31 @@ int get_index_of(struct pollfd *entry) {
   return index;
 }
 
-void pollingsystem_init() {
-  memset(&polling_system, 0, sizeof(PollingSystem));
+void pollingsystem_init() { memset(&polling_system, 0, sizeof(PollingSystem)); }
+
+static void free_poll_results(struct PollResult *root) {
+  if (!root)
+    return;
+
+  if (root->next)
+    free_poll_results(root->next);
+
+  free(root);
 }
 
 void pollingsystem_free() {
   if (polling_system.fds)
     free(polling_system.fds);
 
-  if (polling_system.fds)
-    free(polling_system.poll_results);
+  if (polling_system.poll_results)
+    free_poll_results(polling_system.poll_results);
 
   memset(&polling_system, 0, sizeof(PollingSystem));
 }
 
 int pollingsystem_poll() {
-  int n;
+  int n, cached;
+  n = cached = 0;
 
   if ((n = poll(polling_system.fds, polling_system.size, -1)) < 0) {
     perror("pollingsystem: poll");
@@ -60,51 +67,54 @@ int pollingsystem_poll() {
   if (n == 0)
     return 0;
 
-  /* Cache 'n' results */
-  polling_system.poll_results = (struct pollfd *)realloc(
-      polling_system.poll_results, sizeof(struct pollfd) * n);
+  struct PollResult *root, *last_result;
+  root = last_result = NULL;
 
-  int j = 0;
-  for (unsigned i = 0; i < polling_system.size; i++) {
+  if (polling_system.poll_results)
+    free_poll_results(polling_system.poll_results);
+
+  /* Construct a linked list of all the results */
+  for (int i = 0; i < polling_system.size; i++) {
+    struct pollfd *entry = &polling_system.fds[i];
+
     if (!is_valid_entry(i))
       continue;
 
-    if (polling_system.fds[i].revents != 0)
-      memcpy(&polling_system.poll_results[j++], &polling_system.fds[i],
-             sizeof(struct pollfd));
+    if (entry->revents == 0)
+      continue;
 
-    if (j >= n)
+    struct PollResult *result =
+        (struct PollResult *)calloc(1, sizeof(struct PollResult));
+
+    memcpy(&result->entry, entry, sizeof(struct pollfd));
+
+    if (!root)
+      root = result;
+
+    if (last_result)
+      last_result->next = result;
+
+    last_result = result;
+
+    if (cached++ == n)
       break;
   }
-  polling_system.poll_results_len = j;
 
-  if (n != polling_system.poll_results_len)
+  polling_system.poll_results = root;
+  polling_system.poll_results_len = cached;
+
+  if (n != cached)
     fprintf(stderr, "pollingsystem_poll: cached %i entries when %i expected\n",
             polling_system.poll_results_len, n);
 
   return n;
 }
 
-struct pollfd *pollingsystem_next(struct pollfd *after) {
-  struct pollfd *pentry;
-  int index;
-
+struct PollResult *pollingsystem_next(struct PollResult *after) {
   if (!after)
     return &polling_system.poll_results[0];
 
-  pentry = after + sizeof(struct pollfd);
-  index = (pentry - polling_system.poll_results) / sizeof(struct pollfd);
-
-  /* boundary checks */
-  if (index >= polling_system.poll_results_len)
-    return NULL;
-
-  if (index < 0) {
-    fprintf(stderr, "pollingsystem_next: invalid pointer supplied\n");
-    return NULL;
-  }
-
-  return pentry;
+  return after->next;
 }
 
 /* Register a file descriptor to be polled for events */
@@ -113,7 +123,7 @@ pollsys_handle_t pollingsystem_create_entry(int fd, short events) {
   pollsys_handle_t index = 0;
 
   /* attempt to find the first available slot */
-  for (unsigned i = 0; i < polling_system.size; i++) {
+  for (int i = 0; i < polling_system.size; i++) {
     if (!is_valid_entry(i)) {
       index = i;
       break;

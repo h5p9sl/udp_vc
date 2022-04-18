@@ -28,8 +28,8 @@
 #include "client_list.h"
 
 #include "../shared/config.h"
-#include "../shared/polling.h"
 #include "../shared/networking.h"
+#include "../shared/polling.h"
 
 static const char *str_port = "6060";
 
@@ -167,6 +167,7 @@ int main() {
   pollingsystem_create_entry(vcsock, POLLIN);
 
   while (1) {
+    struct PollResult *result;
     struct pollfd *entry;
 
     int num_results = pollingsystem_poll();
@@ -175,8 +176,10 @@ int main() {
       die("pollingsystem_poll");
     }
 
-    entry = pollingsystem_next(NULL);
-    for (; entry != NULL; entry = pollingsystem_next(entry)) {
+    result = pollingsystem_next(NULL);
+    for (; result != NULL; result = pollingsystem_next(result)) {
+      entry = &result->entry;
+
       if (entry->revents & POLLIN) {
         if (entry->fd == STDIN_FILENO) {
 
@@ -191,6 +194,10 @@ int main() {
           struct sockaddr_storage ip;
           socklen_t iplen = sizeof ip;
           int fd = accept(listener, (struct sockaddr *)&ip, &iplen);
+          if (fd < 0) {
+            perror("accept");
+            return 1;
+          }
 
           if (on_new_connection(fd) < 0)
             close(fd);
@@ -235,10 +242,11 @@ int main() {
 
             memset(ipstr, 0, sizeof(ipstr));
             get_client_ipstr(entry->fd, ipstr, sizeof ipstr);
-            snprintf(buf, sizeof buf, "Connection closed with %s (Error %i occurred)\n", ipstr, networking_get_error());
+            snprintf(buf, sizeof buf,
+                     "Connection closed with %s (Error %i occurred)\n", ipstr,
+                     networking_get_error());
             client_msg_sendall(-1, buf);
-          }
-          else if (!packet.base) {
+          } else if (!packet.base) {
             /* Connection closed */
             char ipstr[INET6_ADDRSTRLEN];
 
@@ -248,12 +256,14 @@ int main() {
 
             snprintf(buf, sizeof buf, "Connection closed with %s\n", ipstr);
             client_msg_sendall(-1, buf);
-          }
-          else {
+          } else {
             /* Successful read */
-            client_msg_sendall(uid, packet.txt->text_cstr);
+            int ret = client_msg_sendall(uid, packet.txt->text_cstr);
+            if (ret < 0)
+              fprintf(stderr,
+                      "Failed to propagate message from uid %i: \"%s\"\n", uid,
+                      packet.txt->text_cstr);
           }
-
         }
       }
     }

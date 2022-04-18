@@ -1,4 +1,6 @@
 #ifndef _POLLING_SYSTEM_H_
+#define _POLLING_SYSTEM_H_
+
 /*! \file polling.h
  * \brief The polling system used by both client and server; a convenient
  * way to wait for network activity.
@@ -9,7 +11,12 @@
 /*! \brief Represents the index of an entry registered in the polling system.
  * \see pollingsystem_create_entry
  */
-typedef short pollsys_handle_t;
+typedef int pollsys_handle_t;
+
+struct PollResult {
+  struct pollfd entry;
+  struct PollResult *next;
+};
 
 void pollingsystem_init();
 void pollingsystem_free();
@@ -59,6 +66,6 @@ int pollingsystem_poll();
  *    Upon success, a pointer to the next entry is returned.
  *    Upon failure, NULL is returned.
  */
-struct pollfd *pollingsystem_next(struct pollfd *after);
+struct PollResult *pollingsystem_next(struct PollResult *after);
 
 #endif
