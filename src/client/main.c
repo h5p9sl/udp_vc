@@ -29,6 +29,8 @@
 #include "../shared/config.h"
 #include "../shared/networking.h"
 #include "../shared/polling.h"
+#include "../shared/ssl_utils.h"
+
 #include "audio_system.h"
 
 static void handle_signal(int signum);
@@ -363,6 +365,9 @@ static void init_ssl(SSL_CTX **pctx, SSL **pssl, int tcpsock) {
   SSL_CTX *ctx;
   SSL *ssl;
 
+  SSL_load_error_strings();
+  SSL_library_init();
+
   *pctx = SSL_CTX_new(TLS_client_method());
   if (!*pctx) {
     ERR_print_errors_fp(stderr);
@@ -377,20 +382,8 @@ static void init_ssl(SSL_CTX **pctx, SSL **pssl, int tcpsock) {
   }
   ssl = *pssl;
 
-  if (SSL_use_certificate_file(ssl, "client.cert", SSL_FILETYPE_PEM) != 1) {
-    ERR_print_errors_fp(stderr);
-    die("SSL_use_certificate_file failed");
-  }
-
-  if (SSL_use_PrivateKey_file(ssl, "client.pem", SSL_FILETYPE_PEM) != 1) {
-    ERR_print_errors_fp(stderr);
-    die("SSL_use_privateKey_file failed");
-  }
-
-  if (SSL_check_private_key(ssl) != 1) {
-    fprintf(stderr, "Private key and certificate is not mathichng\n");
-    die("SSL_check_private_key failed");
-  }
+  if (sslutil_init_ssl(ssl, "client.cert", "client.pem") < 0)
+    die("SSL initialization failed");
 
   if (!SSL_set_fd(ssl, tcpsock)) {
     ERR_print_errors_fp(stderr);
