@@ -8,10 +8,17 @@
 
 #define MAX_CLIENTS 16
 
+enum ClientState {
+  CLIENT_INVALID = 0,
+  CLIENT_NOTREADY,
+  CLIENT_READY,
+};
+
 typedef struct {
   int fd;
   SSL *ssl;
   pollsys_handle_t pollsys_id;
+  enum ClientState state;
 } ClientConnection;
 
 extern ClientConnection client_list[MAX_CLIENTS];
@@ -36,6 +43,7 @@ void clientlist_free();
  * and an error is printed.
  */
 int clientlist_create_client(int newfd);
+int clientlist_handshake_client(int index);
 int clientlist_delete_client(int index);
 int clientlist_get_client_index(int fd);
 
@@ -49,5 +57,6 @@ int client_msg_send(int from, int to, char *str);
  *
  * \see client_msg_send */
 int client_msg_sendall(int from, char *str);
+int client_msg_sendall_fmt(int from, char *format, ...);
 
 #endif

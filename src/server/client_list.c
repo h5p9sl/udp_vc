@@ -1,6 +1,7 @@
 #include "client_list.h"
 
 #include <ctype.h>
+#include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -12,6 +13,9 @@
 
 #include "../shared/networking.h"
 #include "../shared/polling.h"
+#include "../shared/ssl_utils.h"
+
+#include <fcntl.h>
 
 static const char *message_format = "<%s> %s\n";
 
@@ -26,12 +30,20 @@ unsigned int num_clients;
 /* The default state of a client entry when unused */
 static const ClientConnection invalid_client = {
     .fd = -1,
+    .state = CLIENT_INVALID,
     .ssl = NULL,
     .pollsys_id = -1,
 };
 
+static bool is_client_ready(ClientConnection *client) {
+  return client->state == CLIENT_READY;
+}
+
 char is_valid_client(int index) {
-  return index >= 0 && index < MAX_CLIENTS && client_list[index].fd > 0;
+  if (client_list[index].state == CLIENT_INVALID)
+    return 0;
+
+  return index >= 0 && index < MAX_CLIENTS;
 }
 
 int clientlist_get_client_index(int fd) {
@@ -80,19 +92,53 @@ int clientlist_delete_client(int index) {
   return index;
 }
 
-void init_ssl(SSL *ssl) {
-  if (SSL_use_certificate_file(ssl, "server.cert", SSL_FILETYPE_PEM) != 1) {
-    ERR_print_errors_fp(stderr);
-    fputs("SSL_CTX_use_certificate_file failed", stderr);
+static int do_ssl_handshake(ClientConnection *client) {
+  client->state = CLIENT_NOTREADY;
+
+  if (SSL_is_init_finished(client->ssl)) {
+    /* Handshake already complete */
+    fprintf(
+        stderr,
+        "Warning: do_ssl_handshake called when handshake already finished.\n");
+    client->state = CLIENT_READY;
+    return 1;
   }
-  if (SSL_use_PrivateKey_file(ssl, "server.pem", SSL_FILETYPE_PEM) != 1) {
+
+  int accept_ret;
+  if ((accept_ret = SSL_accept(client->ssl)) <= 0) {
+
+    switch (SSL_get_error(client->ssl, accept_ret)) {
+    case SSL_ERROR_WANT_ASYNC:
+    case SSL_ERROR_WANT_READ:
+    case SSL_ERROR_WANT_WRITE:
+      return 0;
+    }
+
+    char ipstr[INET6_ADDRSTRLEN] = {'\0'};
+    get_client_ipstr(client->fd, ipstr, sizeof ipstr);
+
     ERR_print_errors_fp(stderr);
-    fputs("SSL_CTX_use_PrivateKey_file failed", stderr);
+    return -1;
   }
-  if (SSL_check_private_key(ssl) != 1) {
-    ERR_print_errors_fp(stderr);
-    fputs("SSL_CTX_check_private_key failed", stderr);
-  }
+
+  client->state = CLIENT_READY;
+  return 1;
+}
+
+int clientlist_handshake_client(int index) {
+  ClientConnection *client;
+
+  if (!is_valid_client(index))
+    return -1;
+
+  client = &client_list[index];
+
+  int ret = do_ssl_handshake(client);
+
+  if (ret < 0)
+    clientlist_delete_client(index);
+
+  return ret;
 }
 
 /* Create new client entry, perform SSL handshake, and register for event
@@ -125,26 +171,16 @@ int clientlist_create_client(int newfd) {
   }
 
   SSL_set_fd(client.ssl, newfd);
-  init_ssl(client.ssl);
+  SSL_set_mode(client.ssl, SSL_MODE_ASYNC);
+  fcntl(newfd, F_SETFL, O_NONBLOCK);
 
-  if (SSL_accept(client.ssl) <= 0) {
-    char ipstr[INET6_ADDRSTRLEN] = {'\0'};
+  sslutil_init_ssl(client.ssl, "server.cert", "server.pem");
 
-    get_client_ipstr(newfd, ipstr, sizeof ipstr);
-
-    ERR_print_errors_fp(stderr);
-
-    fprintf(stderr,
-            "SSL/TLS handshake with %s failed, closing "
-            "connection.\n",
-            ipstr);
-
-    close(newfd);
-    return -1;
-  }
+  SSL_CTX_free(ctx);
 
   client.fd = newfd;
   client.pollsys_id = pollingsystem_create_entry(newfd, POLLIN);
+  client.state = CLIENT_NOTREADY;
 
   num_clients++;
   memcpy(&client_list[index], &client, sizeof(ClientConnection));
@@ -172,6 +208,8 @@ int client_msg_send(int from, int to, char *str) {
   char buf[561];
   char username[INET6_ADDRSTRLEN];
   int x = 0;
+  ClientConnection *client;
+  TextChatPacket *packet;
 
   memset(buf, 0, sizeof buf);
   memset(str_filtered, 0, sizeof str_filtered);
@@ -198,26 +236,23 @@ int client_msg_send(int from, int to, char *str) {
     return 0;
   }
 
-  if (client_list[to].fd >= 0) {
+  client = &client_list[to];
+  if (!is_client_ready(client))
+    return 0;
 
-    TextChatPacket *packet =
-        networking_new_txt_packet(buf, strnlen(buf, NET_MAX_PACKET_SIZE));
-
-    if (!packet) {
-      networking_print_error();
-      free(packet);
-      return -1;
-    }
-
-    if (!networking_try_send_packet_ssl(client_list[to].ssl,
-                                        (PacketInterface *)packet)) {
-      networking_print_error();
-      free(packet);
-      return -1;
-    }
-
-    free(packet);
+  packet = networking_new_txt_packet(buf, strnlen(buf, NET_MAX_PACKET_SIZE));
+  if (!packet) {
+    networking_print_error();
+    return -1;
   }
+
+  if (!networking_try_send_packet_ssl(client->ssl, (PacketInterface *)packet)) {
+    networking_print_error();
+    free(packet);
+    return -1;
+  }
+
+  free(packet);
   return 0;
 }
 
@@ -228,4 +263,22 @@ int client_msg_sendall(int from, char *str) {
   }
   client_msg_send(from, -1, str);
   return 0;
+}
+
+int client_msg_sendall_fmt(int from, char *format, ...) {
+  char *buf;
+  const size_t buflen = 512;
+  va_list ap;
+
+  buf = calloc(1, buflen);
+  if (!buf) {
+    perror("calloc");
+    return -1;
+  }
+
+  va_start(ap, format);
+  vsnprintf(buf, buflen - 1, format, ap);
+  va_end(ap);
+
+  return client_msg_sendall(from, buf);
 }

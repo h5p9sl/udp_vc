@@ -33,6 +33,24 @@
 
 static const char *str_port = "6060";
 
+static void die(char *reason, ...);
+static void exit_if_nonzero(int retval);
+
+static int socket_from_hints(struct addrinfo *hints, char *port, int *sockfd);
+
+static int init_sockets(int *tcpsock, int *udpsock);
+static void init_ssl_ctx(SSL_CTX **ctx);
+
+static int on_new_connection(int fd);
+static int handle_packet(int uid, IPacketUnion *iface);
+
+static int on_pollin(struct pollfd *entry);
+static int on_pollout(struct pollfd *entry);
+static int on_pollerr(struct pollfd *entry);
+static int on_pollhup(struct pollfd *entry);
+
+static int listener, vcsock;
+
 static int socket_from_hints(struct addrinfo *hints, char *port, int *sockfd) {
   struct addrinfo *cur, *res;
   int status, val;
@@ -75,7 +93,7 @@ static int socket_from_hints(struct addrinfo *hints, char *port, int *sockfd) {
   return 0;
 }
 
-int init_sockets(int *tcpsock, int *udpsock) {
+static int init_sockets(int *tcpsock, int *udpsock) {
   struct addrinfo hints;
 
   memset(&hints, 0, sizeof hints);
@@ -99,7 +117,7 @@ int init_sockets(int *tcpsock, int *udpsock) {
   return 0;
 }
 
-void die(char *reason, ...) {
+static void die(char *reason, ...) {
   va_list ap;
   if (reason) {
     va_start(ap, reason);
@@ -110,31 +128,35 @@ void die(char *reason, ...) {
   exit(1);
 }
 
-int on_new_connection(int fd) {
+static void exit_if_nonzero(int retval) {
+  if (retval != 0) {
+    exit(0);
+  }
+}
+
+static int on_new_connection(int fd) {
   char ipstr[INET6_ADDRSTRLEN] = {'\0'};
 
   get_client_ipstr(fd, ipstr, sizeof ipstr);
 
   if (num_clients >= MAX_CLIENTS) {
-    fprintf(stderr, "Server full, closing connection from %s.\n", ipstr);
+    client_msg_sendall_fmt(-1, "Server full, closing connection from %s.\n", ipstr);
     close(fd);
     return -1;
   }
 
-  /* performs SSL/TLS handshake, and registers for polling */
   int index = clientlist_create_client(fd);
   /* fd is close()'d upon failure inside previous function call */
   if (index < 0)
     return -1;
 
-  char buf[100];
-  snprintf(buf, sizeof buf, "New connection accepted from %s\n", ipstr);
-  client_msg_sendall(-1, buf);
-
   return 0;
 }
 
-void init_ssl_ctx(SSL_CTX **ctx) {
+static void init_ssl_ctx(SSL_CTX **ctx) {
+  SSL_load_error_strings();
+  SSL_library_init();
+
   *ctx = SSL_CTX_new(TLS_server_method());
   if (*ctx == NULL) {
     ERR_print_errors_fp(stderr);
@@ -142,8 +164,130 @@ void init_ssl_ctx(SSL_CTX **ctx) {
   }
 }
 
+static int handle_packet(int uid, IPacketUnion *iface) {
+  IPacketUnion packet;
+  packet.base = iface->base;
+
+  switch (packet.base->type) {
+  case PACKET_TEXT_CHAT:
+    if (client_msg_sendall(uid, packet.txt->text_cstr) < 0)
+      fprintf(stderr, "Failed to propagate message from uid %i: \"%s\"\n", uid,
+              packet.txt->text_cstr);
+    break;
+  case PACKET_VOICE_CHAT:
+    break;
+  default:
+    fprintf(stderr, "Invalid packet type: %u", packet.base->type);
+    free(packet.base);
+    return -1;
+  }
+
+  return 0;
+}
+
+static int on_pollin(struct pollfd *entry) {
+  if (entry->fd == STDIN_FILENO) {
+
+    char buf[256];
+    memset(buf, 0, sizeof(buf));
+    if (read(entry->fd, buf, 255) > 0) {
+      client_msg_sendall(-1, buf);
+    }
+
+  } else if (entry->fd == listener) { /* New connection */
+
+    struct sockaddr_storage ip;
+    socklen_t iplen = sizeof ip;
+    int fd = accept(listener, (struct sockaddr *)&ip, &iplen);
+    if (fd < 0) {
+      perror("accept");
+      return 1;
+    }
+
+    if (on_new_connection(fd) < 0)
+      close(fd);
+
+  } else if (entry->fd == vcsock) { /* Recieved datagram data */
+
+    char buf[512];
+    struct sockaddr_storage addr;
+    socklen_t addrlen;
+
+    size_t r = recvfrom(vcsock, buf, sizeof buf, 0, (struct sockaddr *)&addr,
+                        &addrlen);
+    if (r == 0)
+      perror("recvfrom");
+
+  } else { /* Message recieved from client */
+
+    int uid;
+    char ipstr[INET6_ADDRSTRLEN] = {'\0'};
+
+    uid = clientlist_get_client_index(entry->fd);
+    if (uid < 0)
+      die("POLLIN recieved from fd %i, which isn't a valid client.", entry->fd);
+
+    if (!client_list[uid].ssl)
+      die("POLLIN recieved from client uid %i which doesn't have a valid "
+          "SSL pointer.",
+          uid);
+
+    get_client_ipstr(client_list[uid].fd, ipstr, sizeof ipstr);
+
+    if (client_list[uid].state == CLIENT_NOTREADY) {
+      if (clientlist_handshake_client(uid) < 0) {
+        client_msg_sendall_fmt(-1,
+                               "SSL/TLS handshake with %s failed, closing "
+                               "connection.\n",
+                               ipstr);
+        return 0;
+      }
+
+      /* Welcome the user upon SSL/TLS handshake completion */
+      if (client_list[uid].state != CLIENT_NOTREADY)
+        client_msg_sendall_fmt(-1, "New connection accepted from %s\n", ipstr);
+
+      return 0;
+    }
+
+    IPacketUnion packet; // union of polymorphic pointers
+    packet.base = networking_try_read_packet_ssl(client_list[uid].ssl);
+
+    // No errors and no packet = end of socket stream
+    int was_connection_closed = (!packet.base && networking_get_error() == 0);
+
+    if (packet.base) {
+      handle_packet(uid, &packet);
+    } else {
+      clientlist_delete_client(uid);
+
+      if (was_connection_closed) {
+        /* Connection closed */
+        client_msg_sendall_fmt(-1, "Connection closed with %s\n", ipstr);
+      } else {
+        networking_print_error();
+        client_msg_sendall_fmt(
+            -1, "Connection closed with %s (Error %i occurred)\n", ipstr,
+            networking_get_error());
+      }
+    }
+  }
+  return 0;
+}
+static int on_pollout(struct pollfd *entry) {
+  (void)entry;
+  return 0;
+}
+static int on_pollerr(struct pollfd *entry) {
+  (void)entry;
+  return 0;
+}
+static int on_pollhup(struct pollfd *entry) {
+  (void)entry;
+  return 0;
+}
+
 int main() {
-  int listener, vcsock;
   SSL_CTX *ctx;
 
   init_ssl_ctx(&ctx);
@@ -176,96 +320,23 @@ int main() {
       die("pollingsystem_poll");
     }
 
-    result = pollingsystem_next(NULL);
-    for (; result != NULL; result = pollingsystem_next(result)) {
+    for (result = pollingsystem_next(NULL); result != NULL;
+         result = pollingsystem_next(result)) {
       entry = &result->entry;
 
-      if (entry->revents & POLLIN) {
-        if (entry->fd == STDIN_FILENO) {
+      int revents = entry->revents;
 
-          char buf[256];
-          memset(buf, 0, sizeof(buf));
-          if (read(entry->fd, buf, 255) > 0) {
-            client_msg_sendall(-1, buf);
-          }
+      if (revents & POLLIN)
+        exit_if_nonzero(on_pollin(entry));
 
-        } else if (entry->fd == listener) { /* New connection */
+      if (revents & POLLOUT)
+        exit_if_nonzero(on_pollout(entry));
 
-          struct sockaddr_storage ip;
-          socklen_t iplen = sizeof ip;
-          int fd = accept(listener, (struct sockaddr *)&ip, &iplen);
-          if (fd < 0) {
-            perror("accept");
-            return 1;
-          }
+      if (revents & POLLERR)
+        exit_if_nonzero(on_pollerr(entry));
 
-          if (on_new_connection(fd) < 0)
-            close(fd);
-
-        } else if (entry->fd == vcsock) { /* Recieved datagram data */
-
-          char buf[512];
-          struct sockaddr_storage addr;
-          socklen_t addrlen;
-
-          size_t r = recvfrom(vcsock, buf, sizeof buf, 0,
-                              (struct sockaddr *)&addr, &addrlen);
-          if (r == 0)
-            perror("recvfrom");
-
-        } else { /* Message recieved from client */
-
-          int uid;
-          char buf[256];
-
-          uid = clientlist_get_client_index(entry->fd);
-          if (uid < 0)
-            die("POLLIN recieved from fd %i, which isn't a valid client.",
-                entry->fd);
-
-          if (!client_list[uid].ssl)
-            die("POLLIN recieved from client uid %i which doesn't have a valid "
-                "SSL pointer.",
-                uid);
-
-          memset(buf, 0, sizeof(buf));
-
-          IPacketUnion packet; // union of polymorphic pointers
-          packet.base = networking_try_read_packet_ssl(client_list[uid].ssl);
-
-          if (!packet.base && networking_get_error() != 0) {
-            /* Critical error */
-            networking_print_error();
-            clientlist_delete_client(uid);
-
-            char ipstr[INET6_ADDRSTRLEN];
-
-            memset(ipstr, 0, sizeof(ipstr));
-            get_client_ipstr(entry->fd, ipstr, sizeof ipstr);
-            snprintf(buf, sizeof buf,
-                     "Connection closed with %s (Error %i occurred)\n", ipstr,
-                     networking_get_error());
-            client_msg_sendall(-1, buf);
-          } else if (!packet.base) {
-            /* Connection closed */
-            char ipstr[INET6_ADDRSTRLEN];
-
-            memset(ipstr, 0, sizeof(ipstr));
-            get_client_ipstr(entry->fd, ipstr, sizeof ipstr);
-            clientlist_delete_client(uid);
-
-            snprintf(buf, sizeof buf, "Connection closed with %s\n", ipstr);
-            client_msg_sendall(-1, buf);
-          } else {
-            /* Successful read */
-            int ret = client_msg_sendall(uid, packet.txt->text_cstr);
-            if (ret < 0)
-              fprintf(stderr,
-                      "Failed to propagate message from uid %i: \"%s\"\n", uid,
-                      packet.txt->text_cstr);
-          }
-        }
-      }
+      if (revents & POLLHUP)
+        exit_if_nonzero(on_pollhup(entry));
     }
   }
 
