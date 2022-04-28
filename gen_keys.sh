@@ -12,11 +12,27 @@ delete_keys() {
   rm $1.pem $1.csr $1.cert
 }
 
-if ["$1" == "clean"]; then
-  delete_keys server
-  delete_keys client
+if [ -n "$1" ]; then
+  case "$1" in
+    "clean")
+      delete_keys server
+      delete_keys client
+      break
+      ;;
+    "server")
+      generate_keys server
+      break
+      ;;
+    "client")
+      generate_keys client
+      break
+      ;;
+    *)
+      echo "Usage: $0 [server|client|clean]"
+      echo "Generates key pairs for SSL"
+      ;;
+  esac
+else
+  generate_keys server
+  generate_keys client
 fi
-
-generate_keys server
-generate_keys client
-
