@@ -29,35 +29,16 @@
 #include "../shared/config.h"
 #include "../shared/networking.h"
 #include "../shared/polling.h"
-#include "../shared/ssl_utils.h"
 
 #include "audio_system.h"
+#include "client.h"
 
 static void handle_signal(int signum);
 
-static void die(char *reason);
 static void exit_if_nonzero(int retval);
-
-static int socket_from_hints(struct addrinfo *hints, const char *address,
-                             const char *port, int *sockfd);
-static void init_sockets(const char *address, const char *port, int *tcpsock,
-                         int *udpsock);
-static void init_ssl(SSL_CTX **pctx, SSL **pssl, int tcpsock);
 
 static void tohex(unsigned char *in, size_t insz, char *out, size_t outsz);
 static int user_confirm_peer(SSL *ssl);
-
-static struct ApplicationCtx {
-  bool initialized;
-  int tcpsock;
-  int udpsock;
-  SSL_CTX *ssl_ctx;
-  SSL *ssl;
-} app_ctx;
-
-static void init_app_ctx(const char *address, const char *port,
-                         struct ApplicationCtx *ctx);
-static void free_app_ctx(struct ApplicationCtx *ctx);
 
 /* Wrapper for command processing and sending text packet, depending on the
  * input */
@@ -68,6 +49,8 @@ static int on_packet_received(PacketInterface *packet);
 static int on_voice_out_ready(const unsigned char *opus_data,
                               const unsigned short len);
 
+static ClientAppCtx *ctx;
+
 static int read_user_input() {
   char buf[256];
   ssize_t r;
@@ -76,7 +59,7 @@ static int read_user_input() {
 
   if ((r = read(STDIN_FILENO, &buf, sizeof(buf) - 1)) < 0) {
     perror("read");
-    die("Failed to read stdin");
+    client_die(ctx, "Failed to read stdin");
   }
 
   if (on_user_input(buf, strnlen(buf, sizeof(buf))) < 0)
@@ -90,11 +73,11 @@ static int on_pollin(struct pollfd *entry) {
   if (entry->fd == STDIN_FILENO)
     return read_user_input();
 
-  bool is_ssl = (SSL_get_fd(app_ctx.ssl) == entry->fd);
+  bool is_ssl = (SSL_get_fd(ctx->ssl) == entry->fd);
   IPacketUnion packet; // union of polymorphic pointers
 
   if (is_ssl)
-    packet.base = networking_try_read_packet_ssl(app_ctx.ssl);
+    packet.base = networking_try_read_packet_ssl(ctx->ssl);
   else
     packet.base = networking_try_read_packet_fd(entry->fd);
 
@@ -112,7 +95,7 @@ static int on_pollin(struct pollfd *entry) {
 }
 
 static int on_pollout(struct pollfd *entry) {
-  if (entry->fd == app_ctx.udpsock) {
+  if (entry->fd == ctx->udpsock) {
     unsigned short len;
     unsigned char *opus_data;
 
@@ -145,49 +128,31 @@ static int on_pollhup(struct pollfd *entry) {
 static void handle_signal(int signum) {
   switch (signum) {
   case SIGINT:
-    puts("Exiting peacefully...");
-    if (app_ctx.initialized)
-      free_app_ctx(&app_ctx);
+    puts("Interrupt received. Exiting peacefully...");
+    if (ctx->initialized)
+      client_free(ctx);
+    free(ctx);
     exit(0);
     break;
   }
 }
 
-static void init_app_ctx(const char *address, const char *port,
-                         struct ApplicationCtx *ctx) {
-  init_sockets(address, port, &ctx->tcpsock, &ctx->udpsock);
-  init_ssl(&ctx->ssl_ctx, &ctx->ssl, ctx->tcpsock);
-  ctx->initialized = true;
-}
-
-static void free_app_ctx(struct ApplicationCtx *ctx) {
-  SSL_shutdown(ctx->ssl);
-  SSL_free(ctx->ssl);
-  SSL_CTX_free(ctx->ssl_ctx);
-
-  close(ctx->tcpsock);
-  close(ctx->udpsock);
-
-  ctx->initialized = false;
-}
-
 static int on_user_input(const char *line, const size_t length) {
-  TextChatPacket *pkt;
-
-  pkt = networking_new_txt_packet(line, length);
+  TextChatPacket *pkt = networking_new_txt_packet(line, length);
 
   if (!pkt) {
     networking_print_error();
     return -1;
   }
 
-  if (!networking_try_send_packet_ssl(app_ctx.ssl, (PacketInterface *)pkt)) {
+  if (!networking_try_send_packet_ssl(ctx->ssl, (PacketInterface *)pkt)) {
     networking_print_error();
     free(pkt);
     return -1;
   }
 
   free(pkt);
+	return 0;
 }
 
 static int on_packet_received(PacketInterface *iface) {
@@ -224,7 +189,7 @@ static int on_voice_out_ready(const unsigned char *opus_data,
     return -1;
   }
 
-  if (!networking_try_send_packet_fd(app_ctx.udpsock, (PacketInterface *)pkt)) {
+  if (!networking_try_send_packet_fd(ctx->udpsock, (PacketInterface *)pkt)) {
     networking_print_error();
     fprintf(stderr, "Failed to send VC packet\n");
     free(pkt);
@@ -235,81 +200,9 @@ static int on_voice_out_ready(const unsigned char *opus_data,
   return 0;
 }
 
-static int socket_from_hints(struct addrinfo *hints, const char *address,
-                             const char *port, int *sockfd) {
-  struct addrinfo *cur, *res;
-  int status;
-
-  if ((status = getaddrinfo(address, port, hints, &res)) != 0) {
-    fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(status));
-    return -1;
-  }
-
-  /* Find first usable address given by gettaddrinfo() */
-  for (cur = res; cur != NULL; cur = cur->ai_next) {
-    if ((*sockfd = socket(cur->ai_family, cur->ai_socktype, cur->ai_protocol)) <
-        0) {
-      continue;
-    }
-    if (connect(*sockfd, cur->ai_addr, cur->ai_addrlen) < 0) {
-      close(*sockfd);
-      continue;
-    }
-    /* Usable address; break out */
-    break;
-  }
-
-  freeaddrinfo(res);
-
-  if (cur == NULL) {
-    fprintf(stderr, "Failed to find usable address.\n");
-    perror("socket+bind");
-    return -1;
-  }
-
-  fprintf(stderr, "Created socket of type %s on port %s (fd: %i)\n",
-          (hints->ai_socktype == SOCK_DGRAM) ? "Datagram" : "Stream", port,
-          *sockfd);
-
-  return 0;
-}
-
-static void init_sockets(const char *address, const char *port, int *tcpsock,
-                         int *udpsock) {
-  struct addrinfo hints;
-
-  memset(&hints, 0, sizeof hints);
-  hints.ai_family = AF_UNSPEC; /* Don't care */
-  hints.ai_socktype = SOCK_STREAM;
-  hints.ai_protocol = 0;       /* Use ai_socktype */
-  hints.ai_flags = AI_PASSIVE; /* Use bindable wildcard address */
-
-  if (socket_from_hints(&hints, address, port, tcpsock) < 0)
-    die("Failed to initialize STREAM socket on port 6060");
-
-  // NOTE: AI_PASSIVE flag *breaks* DGRAM sockets.
-  memset(&hints, 0, sizeof hints);
-  hints.ai_family = AF_UNSPEC;
-  hints.ai_socktype = SOCK_DGRAM;
-
-  /* FIXME: consider asking for a valid UDP port from the server */
-  if (socket_from_hints(&hints, address, "6061", udpsock) < 0)
-    die("Failed to initialize DGRAM socket on port 6061");
-}
-
-static void die(char *reason) {
-  puts(reason);
-
-  /* Ensure no resource leaks can happen */
-  if (app_ctx.initialized)
-    free_app_ctx(&app_ctx);
-
-  exit(1);
-}
-
 static void exit_if_nonzero(int retval) {
   if (retval != 0) {
-    free_app_ctx(&app_ctx);
+    client_free(ctx);
     exit(0);
   }
 }
@@ -361,54 +254,9 @@ static int user_confirm_peer(SSL *ssl) {
   return 1;
 }
 
-static void init_ssl(SSL_CTX **pctx, SSL **pssl, int tcpsock) {
-  SSL_CTX *ctx;
-  SSL *ssl;
-
-  SSL_load_error_strings();
-  SSL_library_init();
-
-  *pctx = SSL_CTX_new(TLS_client_method());
-  if (!*pctx) {
-    ERR_print_errors_fp(stderr);
-    die("SSL_CTX_new failed");
-  }
-  ctx = *pctx;
-
-  *pssl = SSL_new(ctx);
-  if (!*pssl) {
-    ERR_print_errors_fp(stderr);
-    die("SSL_new failed");
-  }
-  ssl = *pssl;
-
-  if (sslutil_init_ssl(ssl, "client.cert", "client.pem") < 0)
-    die("SSL initialization failed");
-
-  if (!SSL_set_fd(ssl, tcpsock)) {
-    ERR_print_errors_fp(stderr);
-    die("SSL_set_fd failed");
-  }
-
-  SSL_set_connect_state(ssl);
-
-  if (SSL_connect(ssl) <= 0) {
-    ERR_print_errors_fp(stderr);
-    die("SSL handshake failed");
-  }
-}
-
-// Temporary function
-void audio_stuff() {
-  audiosystem_init();
-
-  audiosystem_free();
-
-  exit(0);
-}
-
 int main(int argc, char *argv[]) {
   char *hostname, *port;
+  ctx = NULL;
 
   if (signal(SIGINT, &handle_signal) == SIG_ERR)
     perror("signal");
@@ -422,19 +270,18 @@ int main(int argc, char *argv[]) {
   hostname = argv[1];
   port = argv[2];
 
-  init_app_ctx(hostname, port, &app_ctx);
+  ctx = (ClientAppCtx *)malloc(sizeof(ClientAppCtx));
+  client_init(ctx, hostname, port);
 
-  pollingsystem_init();
-  pollingsystem_create_entry(STDIN_FILENO, POLLIN);
-  pollingsystem_create_entry(app_ctx.tcpsock, POLLIN);
+  pollingsystem_create_entry(ctx->polling, STDIN_FILENO, POLLIN);
+  pollingsystem_create_entry(ctx->polling, ctx->tcpsock, POLLIN);
 
-  switch (user_confirm_peer(app_ctx.ssl)) {
+  switch (user_confirm_peer(ctx->ssl)) {
   case -1:
-    die("Error in user_confirm_peer");
+    client_die(ctx, "Error in user_confirm_peer");
     break;
   case 0:
-    fprintf(stderr, "User did not trust peer, exiting.\n");
-    free_app_ctx(&app_ctx);
+    client_die(ctx, "User did not trust peer, exiting.");
     return 0;
   }
 
@@ -446,14 +293,14 @@ int main(int argc, char *argv[]) {
     struct PollResult *result;
     struct pollfd *entry;
 
-    int num_results = pollingsystem_poll();
+    int num_results = pollingsystem_poll(ctx->polling);
     if (num_results < 0) {
       perror("poll");
-      die("pollingsystem_poll");
+      client_die(ctx, "pollingsystem_poll");
     }
 
-    for (result = pollingsystem_next(NULL); result != NULL;
-         result = pollingsystem_next(result)) {
+    for (result = pollingsystem_next(ctx->polling, NULL); result != NULL;
+         result = pollingsystem_next(ctx->polling, result)) {
       entry = &result->entry;
 
       int revents = entry->revents;
@@ -472,6 +319,7 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  free_app_ctx(&app_ctx);
+  client_free(ctx);
+  free(ctx);
   return 0;
 }

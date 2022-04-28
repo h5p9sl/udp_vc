@@ -98,6 +98,7 @@ void audiosystem_feed_opus(const unsigned char *opus_data,
   float pcm_data[FRAMES_PER_BUFFER];
   int last_dormant_line = -1;
   int user_id_line = -1;
+  int ret;
 
   int line = -1;
 
@@ -126,8 +127,12 @@ void audiosystem_feed_opus(const unsigned char *opus_data,
   };
 
   /* Fill PCM data */
-  opus_decode_float(audiosys_data->opus_d, opus_data, len, &pcm_data[0],
+  ret = opus_decode_float(audiosys_data->opus_d, opus_data, len, &pcm_data[0],
                     FRAMES_PER_BUFFER, 0);
+  if (ret < 0) {
+    fprintf(stderr, "libopus decoding failed");
+    return;
+  }
 
   memcpy(&pcm_data[0], &line_data.pcm[0], FRAMES_PER_BUFFER);
   memcpy(&audiosys_data->lines[user_id_line], &line_data, sizeof(LineInPCM));

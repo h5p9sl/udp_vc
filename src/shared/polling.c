@@ -4,36 +4,23 @@
 #define __USE_MISC
 #endif
 #include <poll.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct {
-  struct pollfd *fds;
-  int size;
+bool is_valid_entry(struct pollfd *entry) { return entry->fd > -1; }
 
-  struct PollResult *poll_results; /* cached poll results */
-  int poll_results_len;
+int get_index_of(PollingSystem *ctx, struct pollfd *entry) {
+  int index = (entry - ctx->fds) / sizeof(struct pollfd);
 
-} PollingSystem;
-
-static PollingSystem polling_system = {0};
-
-char is_valid_entry(pollsys_handle_t index) {
-  return index >= 0 && index < polling_system.size &&
-         polling_system.fds[index].fd != -1;
-}
-
-int get_index_of(struct pollfd *entry) {
-  int index = (entry - polling_system.fds) / sizeof(struct pollfd);
-
-  if (index > polling_system.size)
+  if (index > ctx->size)
     return -1;
 
   return index;
 }
 
-void pollingsystem_init() { memset(&polling_system, 0, sizeof(PollingSystem)); }
+void pollingsystem_init(PollingSystem *ctx) { memset(ctx, 0, sizeof(PollingSystem)); }
 
 static void free_poll_results(struct PollResult *root) {
   if (!root)
@@ -45,21 +32,21 @@ static void free_poll_results(struct PollResult *root) {
   free(root);
 }
 
-void pollingsystem_free() {
-  if (polling_system.fds)
-    free(polling_system.fds);
+void pollingsystem_free(PollingSystem *ctx) {
+  if (ctx->fds)
+    free(ctx->fds);
 
-  if (polling_system.poll_results)
-    free_poll_results(polling_system.poll_results);
+  if (ctx->poll_results)
+    free_poll_results(ctx->poll_results);
 
-  memset(&polling_system, 0, sizeof(PollingSystem));
+  memset(ctx, 0, sizeof(PollingSystem));
 }
 
-int pollingsystem_poll() {
+int pollingsystem_poll(PollingSystem* ctx) {
   int n, cached;
   n = cached = 0;
 
-  if ((n = poll(polling_system.fds, polling_system.size, -1)) < 0) {
+  if ((n = poll(ctx->fds, ctx->size, -1)) < 0) {
     perror("pollingsystem: poll");
     return -1;
   }
@@ -70,14 +57,14 @@ int pollingsystem_poll() {
   struct PollResult *root, *last_result;
   root = last_result = NULL;
 
-  if (polling_system.poll_results)
-    free_poll_results(polling_system.poll_results);
+  if (ctx->poll_results)
+    free_poll_results(ctx->poll_results);
 
   /* Construct a linked list of all the results */
-  for (int i = 0; i < polling_system.size; i++) {
-    struct pollfd *entry = &polling_system.fds[i];
+  for (int i = 0; i < ctx->size; i++) {
+    struct pollfd *entry = &ctx->fds[i];
 
-    if (!is_valid_entry(i))
+    if (!is_valid_entry(entry))
       continue;
 
     if (entry->revents == 0)
@@ -100,31 +87,33 @@ int pollingsystem_poll() {
       break;
   }
 
-  polling_system.poll_results = root;
-  polling_system.poll_results_len = cached;
+  ctx->poll_results = root;
+  ctx->poll_results_len = cached;
 
   if (n != cached)
     fprintf(stderr, "pollingsystem_poll: cached %i entries when %i expected\n",
-            polling_system.poll_results_len, n);
+            ctx->poll_results_len, n);
 
   return n;
 }
 
-struct PollResult *pollingsystem_next(struct PollResult *after) {
+struct PollResult *pollingsystem_next(PollingSystem* ctx, struct PollResult *after) {
   if (!after)
-    return &polling_system.poll_results[0];
+    return &ctx->poll_results[0];
 
   return after->next;
 }
 
 /* Register a file descriptor to be polled for events */
-pollsys_handle_t pollingsystem_create_entry(int fd, short events) {
+pollsys_handle_t pollingsystem_create_entry(PollingSystem* ctx, int fd, short events) {
   struct pollfd *entry;
   pollsys_handle_t index = 0;
 
   /* attempt to find the first available slot */
-  for (int i = 0; i < polling_system.size; i++) {
-    if (!is_valid_entry(i)) {
+  for (int i = 0; i < ctx->size; i++) {
+    struct pollfd *entry = &ctx->fds[i];
+
+    if (!is_valid_entry(entry)) {
       index = i;
       break;
     }
@@ -132,18 +121,18 @@ pollsys_handle_t pollingsystem_create_entry(int fd, short events) {
 
   /* there is no available slot: a resize is necessary */
   if (!index) {
-    void *newlist = reallocarray(polling_system.fds, ++polling_system.size,
+    void *newlist = reallocarray(ctx->fds, ++ctx->size,
                                  sizeof(struct pollfd));
     if (!newlist) {
       perror("pollingsystem: reallocarray");
       return -1;
     }
 
-    polling_system.fds = newlist;
-    index = polling_system.size - 1;
+    ctx->fds = newlist;
+    index = ctx->size - 1;
   }
 
-  entry = &polling_system.fds[index];
+  entry = &ctx->fds[index];
 
   entry->fd = fd;
   entry->events = events;
@@ -152,15 +141,17 @@ pollsys_handle_t pollingsystem_create_entry(int fd, short events) {
   return index;
 }
 
-pollsys_handle_t pollingsystem_delete_entry(pollsys_handle_t index) {
-  if (!is_valid_entry(index)) {
+pollsys_handle_t pollingsystem_delete_entry(PollingSystem* ctx, pollsys_handle_t index) {
+  struct pollfd *entry = &ctx->fds[index];
+
+  if (!is_valid_entry(entry)) {
     fprintf(stderr,
             "pollingsystem: Cannot delete an invalid entry at %i (fd < 0)\n",
             index);
     return -1;
   }
 
-  polling_system.fds[index].fd = -1;
+  ctx->fds[index].fd = -1;
 
   return index;
 }
