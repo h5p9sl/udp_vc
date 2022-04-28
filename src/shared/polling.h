@@ -1,4 +1,6 @@
 #ifndef _POLLING_SYSTEM_H_
+#define _POLLING_SYSTEM_H_
+
 /*! \file polling.h
  * \brief The polling system used by both client and server; a convenient
  * way to wait for network activity.
@@ -9,10 +11,24 @@
 /*! \brief Represents the index of an entry registered in the polling system.
  * \see pollingsystem_create_entry
  */
-typedef short pollsys_handle_t;
+typedef int pollsys_handle_t;
 
-void pollingsystem_init();
-void pollingsystem_free();
+typedef struct PollResult {
+  struct pollfd entry;
+  struct PollResult *next;
+} PollResult;
+
+typedef struct PollingSystem {
+  struct pollfd *fds;
+  int size;
+
+  struct PollResult *poll_results; /* cached poll results */
+  int poll_results_len;
+
+} PollingSystem;
+
+void pollingsystem_init(PollingSystem *ctx);
+void pollingsystem_free(PollingSystem *ctx);
 
 /*! \brief Register a file descriptor to be polled for events.
  *
@@ -23,7 +39,7 @@ void pollingsystem_free();
  * \param events a bit mask specifying the events the application is interested
  * in for the file descriptor fd.
  */
-pollsys_handle_t pollingsystem_create_entry(int fd, short events);
+pollsys_handle_t pollingsystem_create_entry(PollingSystem *ctx, int fd, short events);
 
 /*! \brief Unregister a file descriptor which is being polled
  *
@@ -32,7 +48,7 @@ pollsys_handle_t pollingsystem_create_entry(int fd, short events);
  *
  * \returns The index/handle of the entry that was removed
  */
-pollsys_handle_t pollingsystem_delete_entry(pollsys_handle_t index);
+pollsys_handle_t pollingsystem_delete_entry(PollingSystem *ctx, pollsys_handle_t index);
 
 /*!
  * \brief Blocks the calling thread until a file descriptor returns an event, to
@@ -44,7 +60,7 @@ pollsys_handle_t pollingsystem_delete_entry(pollsys_handle_t index);
  * with returned events. Upon failure, a negative number is returned and errno
  * is set.
  */
-int pollingsystem_poll();
+int pollingsystem_poll(PollingSystem *ctx);
 
 /*!
  * \brief Returns the next valid entry with returned events. 'after' argument
@@ -59,6 +75,6 @@ int pollingsystem_poll();
  *    Upon success, a pointer to the next entry is returned.
  *    Upon failure, NULL is returned.
  */
-struct pollfd *pollingsystem_next(struct pollfd *after);
+PollResult *pollingsystem_next(PollingSystem *ctx, struct PollResult *after);
 
 #endif

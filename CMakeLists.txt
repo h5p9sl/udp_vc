@@ -43,6 +43,9 @@ target_include_directories(udpvc-server PUBLIC
   ${OPENSSL_INCLUDE_DIR}
 )
 
+target_link_directories(udpvc-client PUBLIC ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
+target_link_directories(udpvc-server PUBLIC ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
+
 target_link_libraries(udpvc-client
   ${OPENSSL_LIBRARIES}
   opus
@@ -55,3 +58,11 @@ target_link_libraries(udpvc-server
   ${OPENSSL_LIBRARIES}
   udpvc-shared
 )
+
+if(MSVC)
+  target_compile_options(udpvc-client PRIVATE /W4 /WX)
+  target_compile_options(udpvc-server PRIVATE /W4 /WX)
+else()
+  target_compile_options(udpvc-client PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  target_compile_options(udpvc-server PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()

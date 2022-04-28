@@ -1,6 +1,7 @@
 set(SERVER_SOURCE
   main.c
   client_list.c
+  server.c
 )
 
 add_executable(udpvc-server
