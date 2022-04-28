@@ -3,11 +3,12 @@
 
 #include <stdbool.h>
 
-#include <openssl/ssl.h>
+typedef struct ssl_ctx_st SSL_CTX;
+typedef struct ssl_st SSL;
 
-#include "../shared/polling.h"
+typedef struct polling_system_st PollingSystem;
 
-typedef struct ClientAppCtx {
+typedef struct client_app_ctx_st {
   bool initialized;
   int tcpsock;
   int udpsock;

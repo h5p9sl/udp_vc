@@ -13,16 +13,16 @@
  */
 typedef int pollsys_handle_t;
 
-typedef struct PollResult {
+typedef struct poll_result_st {
   struct pollfd entry;
-  struct PollResult *next;
+  struct poll_result_st *next;
 } PollResult;
 
-typedef struct PollingSystem {
+typedef struct polling_system_st {
   struct pollfd *fds;
   int size;
 
-  struct PollResult *poll_results; /* cached poll results */
+  PollResult *poll_results; /* cached poll results */
   int poll_results_len;
 
 } PollingSystem;
@@ -39,7 +39,8 @@ void pollingsystem_free(PollingSystem *ctx);
  * \param events a bit mask specifying the events the application is interested
  * in for the file descriptor fd.
  */
-pollsys_handle_t pollingsystem_create_entry(PollingSystem *ctx, int fd, short events);
+pollsys_handle_t pollingsystem_create_entry(PollingSystem *ctx, int fd,
+                                            short events);
 
 /*! \brief Unregister a file descriptor which is being polled
  *
@@ -48,7 +49,8 @@ pollsys_handle_t pollingsystem_create_entry(PollingSystem *ctx, int fd, short ev
  *
  * \returns The index/handle of the entry that was removed
  */
-pollsys_handle_t pollingsystem_delete_entry(PollingSystem *ctx, pollsys_handle_t index);
+pollsys_handle_t pollingsystem_delete_entry(PollingSystem *ctx,
+                                            pollsys_handle_t index);
 
 /*!
  * \brief Blocks the calling thread until a file descriptor returns an event, to
@@ -75,6 +77,6 @@ int pollingsystem_poll(PollingSystem *ctx);
  *    Upon success, a pointer to the next entry is returned.
  *    Upon failure, NULL is returned.
  */
-PollResult *pollingsystem_next(PollingSystem *ctx, struct PollResult *after);
+PollResult *pollingsystem_next(PollingSystem *ctx, PollResult *after);
 
 #endif

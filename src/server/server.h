@@ -3,11 +3,12 @@
 
 #include <stdbool.h>
 
-#include "../shared/polling.h"
+typedef struct ssl_ctx_st SSL_CTX;
 
-#include "client_list.h"
+typedef struct polling_system_st PollingSystem;
+typedef struct client_list_st ClientList;
 
-typedef struct ServerAppCtx {
+typedef struct server_app_ctx_st {
   bool initialized;
   int listener;
   int vcsock;
@@ -21,6 +22,6 @@ void server_free(ServerAppCtx *ctx);
 
 void server_die(ServerAppCtx *ctx, char *reason, ...);
 
-int server_get_num_clients(ServerAppCtx* ctx);
+int server_get_num_clients(ServerAppCtx *ctx);
 
 #endif

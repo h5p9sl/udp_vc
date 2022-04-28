@@ -14,6 +14,9 @@
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 
+#include "../shared/polling.h"
+#include "client_list.h"
+
 #define die(x) server_die(ctx, x)
 
 static void init_ssl(ServerAppCtx *ctx);

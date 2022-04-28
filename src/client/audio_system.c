@@ -128,7 +128,7 @@ void audiosystem_feed_opus(const unsigned char *opus_data,
 
   /* Fill PCM data */
   ret = opus_decode_float(audiosys_data->opus_d, opus_data, len, &pcm_data[0],
-                    FRAMES_PER_BUFFER, 0);
+                          FRAMES_PER_BUFFER, 0);
   if (ret < 0) {
     fprintf(stderr, "libopus decoding failed");
     return;

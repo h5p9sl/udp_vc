@@ -5,10 +5,13 @@
 #ifndef _CLIENT_LIST_H_
 #define _CLIENT_LIST_H_
 
-#include "../shared/polling.h"
-#include <openssl/ssl.h>
-
 #define MAX_CLIENTS 16
+
+typedef struct polling_system_st PollingSystem;
+typedef int pollsys_handle_t;
+typedef struct ssl_st SSL;
+
+#include <stddef.h>
 
 enum ClientState {
   CLIENT_INVALID = 0,
@@ -23,7 +26,7 @@ typedef struct {
   enum ClientState state;
 } ClientConnection;
 
-typedef struct ClientList {
+typedef struct client_list_st {
   ClientConnection *client_list;
   unsigned int num_clients;
 } ClientList;
@@ -46,12 +49,15 @@ void clientlist_free(ClientList *ctx, PollingSystem *polling);
  *  \returns The index of the client entry if found. Otherwise, -1 is returned
  * and an error is printed.
  */
-int clientlist_create_client(ClientList *ctx, PollingSystem *polling, int newfd);
-int clientlist_delete_client(ClientList *ctx, PollingSystem *polling, int index);
-int clientlist_handshake_client(ClientList *ctx, PollingSystem *polling, int index);
+int clientlist_create_client(ClientList *ctx, PollingSystem *polling,
+                             int newfd);
+int clientlist_delete_client(ClientList *ctx, PollingSystem *polling,
+                             int index);
+int clientlist_handshake_client(ClientList *ctx, PollingSystem *polling,
+                                int index);
 
 int clientlist_get_client_index(ClientList *ctx, int fd);
-ClientConnection* clientlist_get_client(ClientList *ctx, int index);
+ClientConnection *clientlist_get_client(ClientList *ctx, int index);
 
 /*! \brief Wrapper function for `getpeername` + `inet_ntop` */
 int get_client_ipstr(int fd, char *buf, size_t len);

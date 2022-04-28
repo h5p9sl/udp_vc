@@ -1,30 +1,10 @@
-#include <ctype.h>
-#include <stdint.h>
-#include <stdio.h>
-
-#ifndef __USE_MISC
-#define __USE_MISC
-#endif
 #include <signal.h>
-#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-
-#include <sys/socket.h>
-#include <sys/types.h>
 
 #include <arpa/inet.h>
-#include <netinet/in.h>
-#include <poll.h>
-
-#ifndef __USE_XOPEN2K
-#define __USE_XOPEN2K
-#endif
-#include <netdb.h>
-
-#include <openssl/err.h>
-#include <openssl/ssl.h>
+#include <unistd.h>
 
 #include "../shared/config.h"
 #include "../shared/networking.h"
@@ -33,21 +13,19 @@
 #include "client_list.h"
 #include "server.h"
 
+#define die(...) server_die(ctx, __VA_ARGS__)
+
+static ServerAppCtx *ctx;
 static const char *str_port = "6060";
 
 static void exit_if_nonzero(int retval);
-
+static void handle_signal(int signum);
 static int on_new_connection(int fd);
 static int handle_packet(int uid, IPacketUnion *iface);
-
 static int on_pollin(struct pollfd *entry);
 static int on_pollout(struct pollfd *entry);
 static int on_pollerr(struct pollfd *entry);
 static int on_pollhup(struct pollfd *entry);
-
-static ServerAppCtx *ctx;
-
-#define die(...) server_die(ctx, __VA_ARGS__)
 
 static void exit_if_nonzero(int retval) {
   if (retval != 0) {
@@ -241,7 +219,7 @@ int main() {
   pollingsystem_create_entry(ctx->polling, ctx->vcsock, POLLIN);
 
   while (1) {
-    struct PollResult *result;
+    PollResult *result;
     struct pollfd *entry;
 
     int num_results = pollingsystem_poll(ctx->polling);

@@ -1,16 +1,16 @@
 #include "client.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-#include <sys/socket.h>
-#include <sys/types.h>
-
-#ifndef __USE_XOPEN2K
-#define __USE_XOPEN2K
-#endif
 #include <netdb.h>
 
+#include <openssl/err.h>
+#include <openssl/ssl.h>
+
+#include "../shared/polling.h"
 #include "../shared/ssl_utils.h"
 
 static int socket_from_hints(struct addrinfo *hints, const char *address,
@@ -19,8 +19,7 @@ static void init_sockets(ClientAppCtx *ctx, const char *address,
                          const char *port);
 static void init_ssl(ClientAppCtx *app);
 
-void client_init(struct ClientAppCtx *ctx, const char *address,
-                 const char *port) {
+void client_init(ClientAppCtx *ctx, const char *address, const char *port) {
   memset(ctx, 0, sizeof(ClientAppCtx));
 
   init_sockets(ctx, address, port);
@@ -33,7 +32,7 @@ void client_init(struct ClientAppCtx *ctx, const char *address,
   ctx->initialized = true;
 }
 
-void client_free(struct ClientAppCtx *ctx) {
+void client_free(ClientAppCtx *ctx) {
   SSL_shutdown(ctx->ssl);
   SSL_free(ctx->ssl);
   SSL_CTX_free(ctx->ssl_ctx);

@@ -1,30 +1,9 @@
 #include <ctype.h>
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdio.h>
-#ifndef __USE_MISC
-#define __USE_MISC
-#endif
 #include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
-#include <sys/socket.h>
-#include <sys/types.h>
-
-#ifndef __USE_XOPEN2K
-#define __USE_XOPEN2K
-#endif
-#include <netdb.h>
-
-#include <openssl/err.h>
-#include <openssl/ssl.h>
-
-#ifndef USE_OPENSSL
-#define USE_OPENSSL
-#endif
 
 #include "../shared/config.h"
 #include "../shared/networking.h"
@@ -33,13 +12,16 @@
 #include "audio_system.h"
 #include "client.h"
 
+#include <openssl/ssl.h>
+
+#define die(...) client_die(ctx, __VA_ARGS__)
+
+static ClientAppCtx *ctx;
+
 static void handle_signal(int signum);
-
 static void exit_if_nonzero(int retval);
-
 static void tohex(unsigned char *in, size_t insz, char *out, size_t outsz);
 static int user_confirm_peer(SSL *ssl);
-
 /* Wrapper for command processing and sending text packet, depending on the
  * input */
 static int read_user_input();
@@ -48,8 +30,10 @@ static int on_packet_received(PacketInterface *packet);
 /* Called whenever voice chat data is ready to be sent out */
 static int on_voice_out_ready(const unsigned char *opus_data,
                               const unsigned short len);
-
-static ClientAppCtx *ctx;
+static int on_pollin(struct pollfd *entry);
+static int on_pollout(struct pollfd *entry);
+static int on_pollerr(struct pollfd *entry);
+static int on_pollhup(struct pollfd *entry);
 
 static int read_user_input() {
   char buf[256];
@@ -59,7 +43,7 @@ static int read_user_input() {
 
   if ((r = read(STDIN_FILENO, &buf, sizeof(buf) - 1)) < 0) {
     perror("read");
-    client_die(ctx, "Failed to read stdin");
+    die("Failed to read stdin");
   }
 
   if (on_user_input(buf, strnlen(buf, sizeof(buf))) < 0)
@@ -152,7 +136,7 @@ static int on_user_input(const char *line, const size_t length) {
   }
 
   free(pkt);
-	return 0;
+  return 0;
 }
 
 static int on_packet_received(PacketInterface *iface) {
@@ -278,10 +262,10 @@ int main(int argc, char *argv[]) {
 
   switch (user_confirm_peer(ctx->ssl)) {
   case -1:
-    client_die(ctx, "Error in user_confirm_peer");
+    die("Error in user_confirm_peer");
     break;
   case 0:
-    client_die(ctx, "User did not trust peer, exiting.");
+    die("User did not trust peer, exiting.");
     return 0;
   }
 
@@ -290,13 +274,13 @@ int main(int argc, char *argv[]) {
   puts("To use text chat, type something and press enter.");
 
   while (1) {
-    struct PollResult *result;
+    PollResult *result;
     struct pollfd *entry;
 
     int num_results = pollingsystem_poll(ctx->polling);
     if (num_results < 0) {
       perror("poll");
-      client_die(ctx, "pollingsystem_poll");
+      die("pollingsystem_poll");
     }
 
     for (result = pollingsystem_next(ctx->polling, NULL); result != NULL;

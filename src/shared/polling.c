@@ -20,9 +20,11 @@ int get_index_of(PollingSystem *ctx, struct pollfd *entry) {
   return index;
 }
 
-void pollingsystem_init(PollingSystem *ctx) { memset(ctx, 0, sizeof(PollingSystem)); }
+void pollingsystem_init(PollingSystem *ctx) {
+  memset(ctx, 0, sizeof(PollingSystem));
+}
 
-static void free_poll_results(struct PollResult *root) {
+static void free_poll_results(PollResult *root) {
   if (!root)
     return;
 
@@ -42,7 +44,7 @@ void pollingsystem_free(PollingSystem *ctx) {
   memset(ctx, 0, sizeof(PollingSystem));
 }
 
-int pollingsystem_poll(PollingSystem* ctx) {
+int pollingsystem_poll(PollingSystem *ctx) {
   int n, cached;
   n = cached = 0;
 
@@ -54,7 +56,7 @@ int pollingsystem_poll(PollingSystem* ctx) {
   if (n == 0)
     return 0;
 
-  struct PollResult *root, *last_result;
+  PollResult *root, *last_result;
   root = last_result = NULL;
 
   if (ctx->poll_results)
@@ -70,8 +72,7 @@ int pollingsystem_poll(PollingSystem* ctx) {
     if (entry->revents == 0)
       continue;
 
-    struct PollResult *result =
-        (struct PollResult *)calloc(1, sizeof(struct PollResult));
+    PollResult *result = (PollResult *)calloc(1, sizeof(PollResult));
 
     memcpy(&result->entry, entry, sizeof(struct pollfd));
 
@@ -97,7 +98,7 @@ int pollingsystem_poll(PollingSystem* ctx) {
   return n;
 }
 
-struct PollResult *pollingsystem_next(PollingSystem* ctx, struct PollResult *after) {
+PollResult *pollingsystem_next(PollingSystem *ctx, PollResult *after) {
   if (!after)
     return &ctx->poll_results[0];
 
@@ -105,7 +106,8 @@ struct PollResult *pollingsystem_next(PollingSystem* ctx, struct PollResult *aft
 }
 
 /* Register a file descriptor to be polled for events */
-pollsys_handle_t pollingsystem_create_entry(PollingSystem* ctx, int fd, short events) {
+pollsys_handle_t pollingsystem_create_entry(PollingSystem *ctx, int fd,
+                                            short events) {
   struct pollfd *entry;
   pollsys_handle_t index = 0;
 
@@ -121,8 +123,7 @@ pollsys_handle_t pollingsystem_create_entry(PollingSystem* ctx, int fd, short ev
 
   /* there is no available slot: a resize is necessary */
   if (!index) {
-    void *newlist = reallocarray(ctx->fds, ++ctx->size,
-                                 sizeof(struct pollfd));
+    void *newlist = reallocarray(ctx->fds, ++ctx->size, sizeof(struct pollfd));
     if (!newlist) {
       perror("pollingsystem: reallocarray");
       return -1;
@@ -141,7 +142,8 @@ pollsys_handle_t pollingsystem_create_entry(PollingSystem* ctx, int fd, short ev
   return index;
 }
 
-pollsys_handle_t pollingsystem_delete_entry(PollingSystem* ctx, pollsys_handle_t index) {
+pollsys_handle_t pollingsystem_delete_entry(PollingSystem *ctx,
+                                            pollsys_handle_t index) {
   struct pollfd *entry = &ctx->fds[index];
 
   if (!is_valid_entry(entry)) {
