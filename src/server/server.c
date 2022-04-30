@@ -126,6 +126,7 @@ static int socket_from_hints(struct addrinfo *hints, const char *address,
     setsockopt(*sockfd, SOL_SOCKET, SO_REUSEPORT, &val, sizeof val);
 
     if (bind(*sockfd, res->ai_addr, res->ai_addrlen) < 0) {
+      perror("bind");
       close(*sockfd);
       continue;
     }
@@ -135,7 +136,7 @@ static int socket_from_hints(struct addrinfo *hints, const char *address,
 
   if (cur == NULL) {
     fprintf(stderr, "Failed to find usable address.\n");
-    perror("socket+bind");
+    perror("socket/bind");
     return -1;
   }
 

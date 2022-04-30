@@ -1,5 +1,6 @@
 #include "client.h"
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,45 +11,63 @@
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 
+#include "../shared/commands.h"
 #include "../shared/polling.h"
 #include "../shared/ssl_utils.h"
 
 static int socket_from_hints(struct addrinfo *hints, const char *address,
                              const char *port, int *sockfd);
-static void init_sockets(ClientAppCtx *ctx, const char *address,
-                         const char *port);
-static void init_ssl(ClientAppCtx *app);
+static void client_init_sockets(ClientAppCtx *ctx, const char *address,
+                                const char *port);
+static void client_init_ssl(ClientAppCtx *app);
+static void client_init_commands(ClientAppCtx *app);
+
+static int on_exit_command(CommandSystem *ctx);
 
 void client_init(ClientAppCtx *ctx, const char *address, const char *port) {
   memset(ctx, 0, sizeof(ClientAppCtx));
 
-  init_sockets(ctx, address, port);
-  init_ssl(ctx);
+  client_init_sockets(ctx, address, port);
+  client_init_ssl(ctx);
 
   ctx->polling = (PollingSystem *)malloc(sizeof(PollingSystem));
-
   pollingsystem_init(ctx->polling);
+
+  client_init_commands(ctx);
 
   ctx->initialized = true;
 }
 
 void client_free(ClientAppCtx *ctx) {
-  SSL_shutdown(ctx->ssl);
-  SSL_free(ctx->ssl);
-  SSL_CTX_free(ctx->ssl_ctx);
-  CRYPTO_cleanup_all_ex_data();
+  if (ctx->connected) {
+    close(ctx->tcpsock);
+    close(ctx->udpsock);
+    ctx->connected = false;
+  }
 
-  close(ctx->tcpsock);
-  close(ctx->udpsock);
+  if (ctx->ssl) {
+    SSL_shutdown(ctx->ssl);
+    SSL_free(ctx->ssl);
+    SSL_CTX_free(ctx->ssl_ctx);
+    ctx->ssl = NULL;
+  }
 
   pollingsystem_free(ctx->polling);
+  cmdsystem_free(ctx->commands);
+
+  free(ctx->commands);
   free(ctx->polling);
 
   ctx->initialized = false;
 }
 
 void client_die(ClientAppCtx *ctx, char *reason) {
-  fputs(reason, stderr);
+  if (reason) {
+    if (errno)
+      perror(reason);
+    else
+      fprintf(stderr, "%s\n", reason);
+  }
 
   if (ctx->initialized)
     client_free(ctx);
@@ -95,8 +114,8 @@ static int socket_from_hints(struct addrinfo *hints, const char *address,
   return 0;
 }
 
-static void init_sockets(ClientAppCtx *ctx, const char *address,
-                         const char *port) {
+static void client_init_sockets(ClientAppCtx *ctx, const char *address,
+                                const char *port) {
   struct addrinfo hints;
 
   memset(&hints, 0, sizeof hints);
@@ -106,7 +125,7 @@ static void init_sockets(ClientAppCtx *ctx, const char *address,
   hints.ai_flags = AI_PASSIVE; /* Use bindable wildcard address */
 
   if (socket_from_hints(&hints, address, port, &ctx->tcpsock) < 0)
-    client_die(ctx, "Failed to initialize STREAM socket on port 6060");
+    client_die(ctx, "Failed to open stream socket.\n");
 
   // NOTE: AI_PASSIVE flag *breaks* DGRAM sockets.
   memset(&hints, 0, sizeof hints);
@@ -115,10 +134,12 @@ static void init_sockets(ClientAppCtx *ctx, const char *address,
 
   /* FIXME: consider asking for a valid UDP port from the server */
   if (socket_from_hints(&hints, address, "6061", &ctx->udpsock) < 0)
-    client_die(ctx, "Failed to initialize DGRAM socket on port 6061");
+    client_die(ctx, "Failed to open dgram socket.\n");
+
+  ctx->connected = true;
 }
 
-static void init_ssl(ClientAppCtx *app) {
+static void client_init_ssl(ClientAppCtx *app) {
   SSL_CTX *ctx;
   SSL *ssl;
 
@@ -142,15 +163,93 @@ static void init_ssl(ClientAppCtx *app) {
   if (sslutil_init_ssl(ssl, "client.cert", "client.pem") < 0)
     client_die(app, "SSL initialization failed");
 
-  if (!SSL_set_fd(ssl, app->tcpsock)) {
-    ERR_print_errors_fp(stderr);
-    client_die(app, "SSL_set_fd failed");
+  if (app->connected) {
+    if (!SSL_set_fd(ssl, app->tcpsock)) {
+      ERR_print_errors_fp(stderr);
+      client_die(app, "SSL_set_fd failed");
+    }
+
+    SSL_set_connect_state(ssl);
+
+    if (SSL_connect(ssl) <= 0) {
+      ERR_print_errors_fp(stderr);
+      client_die(app, "SSL handshake failed");
+    }
+  }
+}
+
+static int tohex(unsigned char *digest, unsigned digestlen, char *out,
+                 size_t outlen) {
+  const char *hex_digits = "0123456789abcdef";
+  unsigned x, i;
+
+  memset(out, 0, digestlen * 2 + 1);
+
+  for (i = x = 0; i < digestlen && (x + 2) < outlen; i++) {
+    unsigned char c = digest[i];
+
+    // least significant bits 0..15 (0x0 -> 0xf)
+    out[x++] = hex_digits[c & 0x0f];
+    // most significant bits 16..240 (0x10 -> 0xf0)
+    out[x++] = hex_digits[c >> 4]; // c >> 4 == (c & 0xf0 / 16)
+    out[x++] = ':';
   }
 
-  SSL_set_connect_state(ssl);
+  if (x < outlen)
+    out[x++] = '\0';
 
-  if (SSL_connect(ssl) <= 0) {
-    ERR_print_errors_fp(stderr);
-    client_die(app, "SSL handshake failed");
+  // number of characters written to *out
+  return x;
+}
+
+int client_user_confirm_peer(ClientAppCtx *ctx) {
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  char buf[256];
+  unsigned len;
+  int ret;
+
+  if (!ctx->ssl || !ctx->connected)
+    return -1;
+
+  X509 *cert = SSL_get_peer_certificate(ctx->ssl);
+  if (!cert) {
+    fprintf(stderr, "No valid peer certificate");
+    return -1;
   }
+
+  memset(digest, 0, sizeof(digest));
+  ret = X509_digest(cert, EVP_sha1(), &digest[0], &len);
+  if (ret < 0) {
+    fprintf(stderr, "X509_digest failed.");
+    ERR_print_errors_fp(stderr);
+    return -1;
+  }
+
+  tohex(digest, len, buf, sizeof(buf));
+  printf("%s\n", buf);
+  printf("Trust peer fingerprint? (Y/n)\n");
+
+  ret = read(STDIN_FILENO, buf, sizeof(buf));
+  if (ret < 0) {
+    perror("read");
+    return -1;
+  }
+
+  if (buf[0] == 'n' || buf[0] == 'N')
+    return 0;
+
+  return 1;
+}
+
+static int on_exit_command(CommandSystem *ctx) {
+  (void)ctx;
+  puts("Goodbye.");
+  exit(0);
+}
+
+static void client_init_commands(ClientAppCtx *ctx) {
+  ctx->commands = (CommandSystem *)malloc(sizeof(CommandSystem));
+  cmdsystem_init(ctx->commands);
+
+  cmdsystem_push_command(ctx->commands, "exit", on_exit_command);
 }

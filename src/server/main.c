@@ -16,7 +16,6 @@
 #define die(...) server_die(ctx, __VA_ARGS__)
 
 static ServerAppCtx *ctx;
-static const char *str_port = "6060";
 
 static void exit_if_nonzero(int retval);
 static void handle_signal(int signum);
@@ -204,9 +203,9 @@ int main() {
     perror("signal");
 
   ctx = (ServerAppCtx *)malloc(sizeof(ServerAppCtx));
-  server_init(ctx, NULL, str_port);
+  server_init(ctx, NULL, UDPVC_DEFAULT_PORT);
 
-  printf("Listening on port %s\n", str_port);
+  printf("Listening on port %s\n", UDPVC_DEFAULT_PORT);
 
   if (listen(ctx->listener, 10) < 0) {
     perror("listen");
