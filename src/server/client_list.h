@@ -13,6 +13,8 @@ typedef struct ssl_st SSL;
 
 #include <stddef.h>
 
+#include <netinet/in.h>
+
 enum ClientState {
   CLIENT_INVALID = 0,
   CLIENT_NOTREADY,
@@ -20,10 +22,18 @@ enum ClientState {
 };
 
 typedef struct {
+  char nickname[16];
+  enum ClientState state;
+
+  char ipstr[INET6_ADDRSTRLEN];
+  struct sockaddr_storage ip;
+  socklen_t iplen;
+
   int fd;
   SSL *ssl;
+
   pollsys_handle_t pollsys_id;
-  enum ClientState state;
+
 } ClientConnection;
 
 typedef struct client_list_st {
