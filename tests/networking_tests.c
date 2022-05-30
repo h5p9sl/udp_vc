@@ -1,15 +1,17 @@
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <networking.h>
 
-#define PACKET_CREATION_TEST "creation"
-#define PACKET_IO_TEST "sending-and-receiving"
-#define PACKET_UNPACKING_TEST "unpacking"
-#define PERFORM_ALL_TESTS ((char *)NULL)
+#include "tests.h"
+#include "z_malloc.h"
 
-typedef int (*test_fn)(void);
+#define LEN(x) (sizeof(x) / sizeof(x[0]))
+
+TextChatPacket *mock_txt_pkt();
+VoiceChatPacket *mock_vc_pkt();
 
 TextChatPacket *mock_txt_pkt() {
   IPacketUnion pkt;
@@ -38,7 +40,7 @@ VoiceChatPacket *mock_vc_pkt() {
     networking_print_error();
     exit(1);
   }
-  assert(pkt.vc->opus_data_len == opus_datalen);
+  assert((size_t)pkt.vc->opus_data_len == opus_datalen);
   assert(pkt.base->type == PACKET_VOICE_CHAT);
   assert(pkt.base->inner_data_len ==
          sizeof(*pkt.vc) - sizeof(*pkt.base) + opus_datalen);
@@ -100,64 +102,25 @@ int sending_and_receiving() {
   return 0;
 }
 
-int perform_test(const char *test_name) {
+int main(int argc, char *argv[]) {
+  int r;
   const char *test_names[] = {
-      PACKET_CREATION_TEST,
-      PACKET_IO_TEST,
+      "creation",
+      "sending-and-receiving",
   };
-  const test_fn associated_functions[] = {
+  const test_fn_t associated_functions[] = {
       packet_creation,
       sending_and_receiving,
   };
+  assert(LEN(test_names) == LEN(associated_functions));
 
-  size_t num_tests = sizeof(associated_functions) / sizeof(test_fn);
+  tests_t *t = z_malloc(sizeof(tests_t));
 
-  if (test_name == (char *)PERFORM_ALL_TESTS) {
-    int r = 0;
+  tests_init(t, "Networking System Tests", test_names, associated_functions,
+             LEN(test_names));
 
-    printf("[networking] Performing ALL tests...\n");
+  r = tests_run(t, argc, argv);
 
-    for (unsigned int i = 0; i < num_tests; i++) {
-      printf("[networking] Performing \"%s\" test... \n", test_names[i]);
-      r |= associated_functions[i]();
-      if (r == 0)
-        printf("[networking] OK.\n");
-      else
-        return r;
-    }
-
-    return r;
-  }
-
-  printf("Performing \"%s\" test...\n", test_name);
-
-  for (unsigned int i = 0; i < num_tests; i++) {
-    if (strncmp(test_name, test_names[i], strlen(test_names[i])) == 0)
-      return associated_functions[i]();
-  }
-
-  fprintf(stderr, "No such test name of \"%s\"!\n", test_name);
-  fprintf(stderr, "Here are a list of tests to choose from, OR don't provide "
-                  "any test name to perform all of them.\n");
-
-  for (unsigned int i = 0; i < num_tests; i++)
-    fprintf(stderr, "%i : \"%s\"\n", i, test_names[i]);
-
-  return 1;
-}
-
-int main(int argc, char *argv[]) {
-
-  switch (argc) {
-  case 1:
-    return perform_test(PERFORM_ALL_TESTS);
-  case 2:
-    return perform_test(argv[1]);
-  default:
-    fprintf(stderr, "Invalid argv passed into main!\n");
-    return 1;
-  }
-
-  printf("Ok.\n");
-  return 0;
+  tests_free(t);
+  return r;
 }

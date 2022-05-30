@@ -1,31 +1,11 @@
 #include <ctype.h>
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdio.h>
-#ifndef __USE_MISC
-#define __USE_MISC
-#endif
 #include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-#include <sys/socket.h>
-#include <sys/types.h>
-
-#ifndef __USE_XOPEN2K
-#define __USE_XOPEN2K
-#endif
-#include <netdb.h>
-
-#include <openssl/err.h>
-#include <openssl/ssl.h>
-
-#ifndef USE_OPENSSL
-#define USE_OPENSSL
-#endif
-
+#include "../shared/commands.h"
 #include "../shared/config.h"
 #include "../shared/networking.h"
 #include "../shared/polling.h"
@@ -33,13 +13,14 @@
 #include "audio_system.h"
 #include "client.h"
 
+#include <openssl/ssl.h>
+
+#define die(...) client_die(ctx, __VA_ARGS__)
+
+static ClientAppCtx *ctx;
+
 static void handle_signal(int signum);
-
 static void exit_if_nonzero(int retval);
-
-static void tohex(unsigned char *in, size_t insz, char *out, size_t outsz);
-static int user_confirm_peer(SSL *ssl);
-
 /* Wrapper for command processing and sending text packet, depending on the
  * input */
 static int read_user_input();
@@ -48,8 +29,10 @@ static int on_packet_received(PacketInterface *packet);
 /* Called whenever voice chat data is ready to be sent out */
 static int on_voice_out_ready(const unsigned char *opus_data,
                               const unsigned short len);
-
-static ClientAppCtx *ctx;
+static int on_pollin(struct pollfd *entry);
+static int on_pollout(struct pollfd *entry);
+static int on_pollerr(struct pollfd *entry);
+static int on_pollhup(struct pollfd *entry);
 
 static int read_user_input() {
   char buf[256];
@@ -59,7 +42,7 @@ static int read_user_input() {
 
   if ((r = read(STDIN_FILENO, &buf, sizeof(buf) - 1)) < 0) {
     perror("read");
-    client_die(ctx, "Failed to read stdin");
+    die("Failed to read stdin");
   }
 
   if (on_user_input(buf, strnlen(buf, sizeof(buf))) < 0)
@@ -129,16 +112,18 @@ static void handle_signal(int signum) {
   switch (signum) {
   case SIGINT:
     puts("Interrupt received. Exiting peacefully...");
-    if (ctx->initialized)
-      client_free(ctx);
-    free(ctx);
     exit(0);
     break;
   }
 }
 
 static int on_user_input(const char *line, const size_t length) {
-  TextChatPacket *pkt = networking_new_txt_packet(line, length);
+  TextChatPacket *pkt;
+
+  if (cmdsystem_on_user_input(ctx->commands, line, length))
+    return 0;
+
+  pkt = networking_new_txt_packet(line, length);
 
   if (!pkt) {
     networking_print_error();
@@ -152,7 +137,7 @@ static int on_user_input(const char *line, const size_t length) {
   }
 
   free(pkt);
-	return 0;
+  return 0;
 }
 
 static int on_packet_received(PacketInterface *iface) {
@@ -207,51 +192,14 @@ static void exit_if_nonzero(int retval) {
   }
 }
 
-static void tohex(unsigned char *in, size_t insz, char *out, size_t outsz) {
-  unsigned char *pin = in;
-  const char *hex = "0123456789ABCDEF";
-  char *pout = out;
-  for (; pin < in + insz; pout += 3, pin++) {
-    pout[0] = hex[(*pin >> 4) & 0xF];
-    pout[1] = hex[*pin & 0xF];
-    pout[2] = ':';
-    if ((uintptr_t)pout + 3 - (uintptr_t)out > outsz) {
-      break;
-    }
-  }
-  pout[-1] = 0;
-}
+static void udpvc_on_exit() {
+  if (!ctx)
+    return;
 
-/* Prompts the user to confirm the peer's certificate fingerpint */
-static int user_confirm_peer(SSL *ssl) {
-  unsigned char digest[EVP_MAX_MD_SIZE];
-  char out[64];
-  unsigned len;
+  if (ctx->initialized)
+    client_free(ctx);
 
-  X509 *cert = SSL_get_peer_certificate(ssl);
-  if (!cert) {
-    fprintf(stderr, "No valid peer certificate");
-    return -1;
-  }
-
-  memset(digest, 0, sizeof(digest));
-  X509_digest(cert, EVP_sha1(), &digest[0], &len);
-
-  tohex(digest, len, out, sizeof(out));
-  printf("%s\n", out);
-  printf("Trust peer fingerprint? (Y/n)\n");
-
-  char buf[256];
-  ssize_t r = read(STDIN_FILENO, buf, 255);
-  if (r < 0) {
-    perror("read");
-    return -1;
-  }
-
-  if (tolower(buf[0]) == 'n')
-    return 0;
-
-  return 1;
+  free(ctx);
 }
 
 int main(int argc, char *argv[]) {
@@ -261,14 +209,17 @@ int main(int argc, char *argv[]) {
   if (signal(SIGINT, &handle_signal) == SIG_ERR)
     perror("signal");
 
+  if (atexit(udpvc_on_exit) != 0)
+    perror("atexit");
+
   printf("udp_vc client version %s\n", UDPVC_VERSION);
-  if (argc < 3) {
-    printf("Usage: %s <hostname> <port>\n", argv[0]);
+  if (argc < 2) {
+    printf("Usage: %s <hostname> [port]\n", argv[0]);
     return 0;
   }
 
   hostname = argv[1];
-  port = argv[2];
+  port = (argc > 2) ? argv[2] : UDPVC_DEFAULT_PORT;
 
   ctx = (ClientAppCtx *)malloc(sizeof(ClientAppCtx));
   client_init(ctx, hostname, port);
@@ -276,13 +227,13 @@ int main(int argc, char *argv[]) {
   pollingsystem_create_entry(ctx->polling, STDIN_FILENO, POLLIN);
   pollingsystem_create_entry(ctx->polling, ctx->tcpsock, POLLIN);
 
-  switch (user_confirm_peer(ctx->ssl)) {
+  switch (client_user_confirm_peer(ctx)) {
   case -1:
-    client_die(ctx, "Error in user_confirm_peer");
+    die("Error in user_confirm_peer");
     break;
   case 0:
-    client_die(ctx, "User did not trust peer, exiting.");
-    return 0;
+    printf("User did not trust peer, exiting.\n");
+    exit(0);
   }
 
   puts("Connected. To start/stop transmitting your "
@@ -290,13 +241,13 @@ int main(int argc, char *argv[]) {
   puts("To use text chat, type something and press enter.");
 
   while (1) {
-    struct PollResult *result;
+    PollResult *result;
     struct pollfd *entry;
 
     int num_results = pollingsystem_poll(ctx->polling);
     if (num_results < 0) {
       perror("poll");
-      client_die(ctx, "pollingsystem_poll");
+      die("pollingsystem_poll");
     }
 
     for (result = pollingsystem_next(ctx->polling, NULL); result != NULL;

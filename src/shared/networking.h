@@ -11,15 +11,19 @@
 /*! The maximum allowed size for a packet */
 #define NET_MAX_PACKET_SIZE (512)
 
-#include <openssl/ssl.h>
+#include <stddef.h>
+#include <stdint.h>
+
+typedef struct ssl_ctx_st SSL_CTX;
+typedef struct ssl_st SSL;
 
 /*! Defines all the valid types of packets.
  * \see PacketInterface
  */
 enum PacketType { PACKET_NONE = 0, PACKET_TEXT_CHAT, PACKET_VOICE_CHAT };
 
-/*! \brief The base packet, which provides the basic information of all inheriting
- * packets.
+/*! \brief The base packet, which provides the basic information of all
+ * inheriting packets.
  *
  * This structure defines the first section of every packet, which is used to
  * tell the user what kind of packet it is, and how much data it contains.
@@ -70,7 +74,8 @@ typedef struct {
  * \see PacketInterface PacketType
  *
  * Using this union, you can read a packet into the `base` member, and type-pun
- * into any of the other members associated with the packet type (`PacketInterface.type`).
+ * into any of the other members associated with the packet type
+ * (`PacketInterface.type`).
  *
  * This union is not necessary, but it is convenient.
  */

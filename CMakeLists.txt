@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.14)
 
 project(udp-vc
-  VERSION 0.2.1
+  VERSION 0.2.2
   DESCRIPTION "Simple SSL/TLS chat server & client"
   LANGUAGES C CXX
 )

@@ -17,17 +17,29 @@
 
 #include <fcntl.h>
 
-static const char *message_format = "<%s> %s\n";
-
 /* conditionally use IPv4 or IPv6 */
 #define SOCKADDRSTORAGE_GET_SINADDR(x)                                         \
-  ((x.ss_family == AF_INET) ? (void *)&((struct sockaddr_in *)&x)->sin_addr    \
-                            : (void *)&((struct sockaddr_in6 *)&x)->sin6_addr)
+  (((x).ss_family == AF_INET)                                                  \
+       ? (void *)&((struct sockaddr_in *)&(x))->sin_addr                       \
+       : (void *)&((struct sockaddr_in6 *)&(x))->sin6_addr)
+#define MIN(x, y) ((x > y) ? y : x)
+
+static int ipstr_from_sockaddr(struct sockaddr_storage *ip, socklen_t *iplen,
+                               char *buf, size_t buflen);
+static int sockaddr_from_fd(int fd, struct sockaddr_storage *ip,
+                            socklen_t *iplen);
+
+static const char *message_format = "<%s> %s\n";
 
 /* The default state of a client entry when unused */
 static const ClientConnection invalid_client = {
-    .fd = -1,
+    .nickname = {'\0'},
     .state = CLIENT_INVALID,
+
+    .ipstr = {'\0'},
+    .iplen = 0,
+
+    .fd = -1,
     .ssl = NULL,
     .pollsys_id = -1,
 };
@@ -121,9 +133,6 @@ static int do_ssl_handshake(ClientConnection *client) {
       return 0;
     }
 
-    char ipstr[INET6_ADDRSTRLEN] = {'\0'};
-    get_client_ipstr(client->fd, ipstr, sizeof ipstr);
-
     ERR_print_errors_fp(stderr);
     return -1;
   }
@@ -156,6 +165,8 @@ int clientlist_create_client(ClientList *ctx, PollingSystem *polling,
   int index = -1;
   ClientConnection client;
   SSL_CTX *ssl_ctx;
+  struct sockaddr_storage ip;
+  socklen_t iplen = sizeof ip;
 
   for (int i = 0; i < MAX_CLIENTS; i++) {
     if (!is_valid_client(ctx, i)) {
@@ -191,23 +202,61 @@ int clientlist_create_client(ClientList *ctx, PollingSystem *polling,
   client.pollsys_id = pollingsystem_create_entry(polling, newfd, POLLIN);
   client.state = CLIENT_NOTREADY;
 
+  if (sockaddr_from_fd(newfd, &ip, &iplen) < 0) {
+    printf("Faled to get socket address for client fd %i\n", newfd);
+    return -1;
+  }
+
+  if (ipstr_from_sockaddr(&ip, &iplen, client.ipstr,
+                          sizeof(client.ipstr) / sizeof(*client.ipstr)) < 0) {
+    printf("Failed to get IP address string for client fd %i\n", newfd);
+    return -1;
+  }
+
+  memcpy(&client.ip, &ip, sizeof(ip));
+  memcpy(&client.iplen, &iplen, sizeof(iplen));
+
   ctx->num_clients++;
   memcpy(&ctx->client_list[index], &client, sizeof(ClientConnection));
   return index;
 }
 
-int get_client_ipstr(int fd, char *buf, size_t len) {
-  struct sockaddr_storage ip;
-  socklen_t iplen = sizeof ip;
+static int ipstr_from_sockaddr(struct sockaddr_storage *ip, socklen_t *iplen,
+                               char *buf, size_t buflen) {
+  char dst[INET_ADDRSTRLEN];
 
-  memset(&ip, 0, sizeof(struct sockaddr_storage));
-
-  getpeername(fd, (struct sockaddr *)&ip, &iplen);
-  if (inet_ntop(ip.ss_family, SOCKADDRSTORAGE_GET_SINADDR(ip), buf, len) ==
+  if (inet_ntop(ip->ss_family, SOCKADDRSTORAGE_GET_SINADDR(*ip), dst, *iplen) ==
       NULL) {
     perror("inet_ntop");
     return -1;
   }
+
+  strncpy(buf, dst, MIN(buflen, INET_ADDRSTRLEN));
+  return 0;
+}
+
+static int sockaddr_from_fd(int fd, struct sockaddr_storage *ip,
+                            socklen_t *iplen) {
+  memset(ip, 0, sizeof(*ip));
+
+  if (getpeername(fd, (struct sockaddr *)ip, iplen) < 0) {
+    perror("getpeername");
+    return -1;
+  }
+
+  return 0;
+}
+
+int get_client_ipstr(int fd, char *buf, size_t buflen) {
+  struct sockaddr_storage ip;
+  socklen_t iplen = sizeof ip;
+
+  if (sockaddr_from_fd(fd, &ip, &iplen))
+    return -1;
+
+  if (ipstr_from_sockaddr(&ip, &iplen, buf, buflen) < 1)
+    return -1;
+
   return 0;
 }
 
@@ -220,7 +269,10 @@ int client_msg_send(ClientList *ctx, int from, int to, char *str) {
   ClientConnection *client;
   TextChatPacket *packet;
 
+  client = &ctx->client_list[from];
+
   memset(buf, 0, sizeof buf);
+  memset(username, 0, sizeof buf);
   memset(str_filtered, 0, sizeof str_filtered);
 
   /* filter string to printable characters only */
@@ -231,9 +283,17 @@ int client_msg_send(ClientList *ctx, int from, int to, char *str) {
     }
   }
 
-  /* get ip address as string */
-  if (from >= 0) {
-    get_client_ipstr(ctx->client_list[from].fd, username, sizeof username);
+  if (from >= 0 && *client->nickname != 0) {
+    strncpy(username, client->nickname,
+            MIN(sizeof(username), sizeof(client->nickname)));
+  } else if (from >= 0) {
+
+    if (!*client->ipstr) {
+      printf("User does not have an IP string...\n");
+    }
+
+    strncpy(username, client->ipstr,
+            MIN(sizeof(username), sizeof(client->ipstr)));
   } else { /* Message is from server */
     strcpy(username, "SERVER");
   }
